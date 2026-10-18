@@ -26,7 +26,7 @@ export type SecretCallbackLong = GetVerificationKey;
 export type IsRevoked = (req: express.Request, token: jwt.Jwt | undefined) => boolean | Promise<boolean>;
 
 /**
- * A function to check if a token is revoked
+ * A function to handle expired tokens. If it returns without throwing, the expired token is accepted.
  */
 export type ExpirationHandler = (req: express.Request, err: UnauthorizedError) => void | Promise<void>;
 
@@ -52,8 +52,8 @@ export type Params = {
   isRevoked?: IsRevoked,
 
   /**
-   * If sets to true, continue to the next middleware when the
-   * request doesn't include a token without failing.
+   * If set to false, continue to the next middleware when the
+   * request doesn't include a token instead of failing.
    *
    * @default true
    */
