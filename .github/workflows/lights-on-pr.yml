@@ -166,6 +166,7 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           LIGHTS_ON_READ_ONLY: 'true'
         with:
+          sandbox_image: ${{ vars.LIGHTS_ON_SANDBOX_IMAGE }}
           task: pr-reviewer
           tier: reasoning
           event_file: /tmp/pr.json

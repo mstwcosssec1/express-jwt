@@ -124,6 +124,7 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           LIGHTS_ON_UPSTREAM_REPO: ${{ steps.upstream-sync.outputs.upstream_repo }}
         with:
+          sandbox_image: ${{ vars.LIGHTS_ON_SANDBOX_IMAGE }}
           task: bootstrap-threat-model
           tier: reasoning
           install_threat_model_skills: 'true'
@@ -176,6 +177,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         with:
+          sandbox_image: ${{ vars.LIGHTS_ON_SANDBOX_IMAGE }}
           task: security-remediator
           tier: reasoning
           context_file: /tmp/lights-on-deps.json
@@ -220,6 +222,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         with:
+          sandbox_image: ${{ vars.LIGHTS_ON_SANDBOX_IMAGE }}
           task: dependency-maintainer
           tier: reasoning
           context_file: /tmp/lights-on-deps.json
@@ -313,6 +316,7 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           LIGHTS_ON_UPSTREAM_REPO: ${{ steps.upstream-sync.outputs.upstream_repo }}
         with:
+          sandbox_image: ${{ vars.LIGHTS_ON_SANDBOX_IMAGE }}
           task: docs-clarifier
           tier: default
           context_file: /tmp/lights-on-upstream-context.json
@@ -370,6 +374,7 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           LIGHTS_ON_UPSTREAM_REPO: ${{ steps.upstream-sync.outputs.upstream_repo }}
         with:
+          sandbox_image: ${{ vars.LIGHTS_ON_SANDBOX_IMAGE }}
           task: issue-responder
           tier: reasoning
           event_file: /tmp/lights-on-actionable-issues.json

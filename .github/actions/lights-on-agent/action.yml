@@ -9,6 +9,10 @@ inputs:
     description: "Model routing tier: default or reasoning"
     required: false
     default: "default"
+  sandbox_image:
+    description: "Trusted command-worker image; empty uses the runner's digest-pinned default"
+    required: false
+    default: ""
   event_file:
     description: "Optional path to serialized GitHub event JSON payload"
     required: false
@@ -104,7 +108,7 @@ runs:
         CHECK_PROVIDER: ${{ steps.check-config.outputs.provider }}
         CHECK_MODEL: ${{ steps.check-config.outputs.model }}
         LIGHTS_ON_UPSTREAM_REPO: ${{ steps.check-config.outputs.upstream_repo }}
-        LIGHTS_ON_SANDBOX_IMAGE: ${{ vars.LIGHTS_ON_SANDBOX_IMAGE }}
+        LIGHTS_ON_SANDBOX_IMAGE: ${{ inputs.sandbox_image }}
       run: |
         if [ "$CONFIG_ENABLED" = "false" ] || [ "$LIGHTS_ON_ENABLED" = "false" ]; then
           echo "Lights On is disabled (LIGHTS_ON_ENABLED=false); skipping agent execution."

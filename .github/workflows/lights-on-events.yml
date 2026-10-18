@@ -200,6 +200,7 @@ jobs:
           LIGHTS_ON_READ_ONLY: ${{ steps.authorize.outputs.read_only_mode }}
           ALLOW_WORKFLOW_EDIT: ${{ steps.authorize.outputs.slash_command == 'update-threat-model' && 'true' || 'false' }}
         with:
+          sandbox_image: ${{ vars.LIGHTS_ON_SANDBOX_IMAGE }}
           task: ${{ (github.event.label.name == 'lights-on:migrate-dep' || steps.authorize.outputs.slash_command == 'migrate-dep') && 'dependency-maintainer' || (steps.authorize.outputs.slash_command == 'release' && 'release-manager' || (steps.authorize.outputs.slash_command == 'update-threat-model' && 'bootstrap-threat-model' || 'issue-responder')) }}
           tier: ${{ (github.event.label.name == 'lights-on:migrate-dep' || steps.authorize.outputs.slash_command == 'migrate-dep' || steps.authorize.outputs.slash_command == 'release' || steps.authorize.outputs.slash_command == 'update-threat-model') && 'reasoning' || 'default' }}
           event_file: /tmp/lights-on-event.json
