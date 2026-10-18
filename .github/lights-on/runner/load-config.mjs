@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 export const DEFAULT_CONFIG = {
   version: 1,
   enabled: true,
+  events: { allow_external_triggers: false },
   engine: {
     provider: 'auto',
     models: {
@@ -56,7 +57,10 @@ export const DEFAULT_CONFIG = {
     max_turns_per_run: 25,
     max_tokens_per_run: 100000,
     max_cost_per_run_usd: 2.0,
-    max_daily_budget_usd: 10.0
+    max_daily_budget_usd: 10.0,
+    max_input_bytes: 262144,
+    max_output_tokens: 8192,
+    max_model_calls_per_run: 30
   },
   release: {
     enabled: true,
@@ -65,7 +69,24 @@ export const DEFAULT_CONFIG = {
     min_commits_for_release: 1,
     immediate_on_security: true,
     create_github_release: true,
-    provenance: true
+    provenance: true,
+    package_names: {}
+  },
+  dependencies: {
+    update_max_turns: 8,
+    migration_plan_max_turns: 12,
+    migration_max_turns: 20,
+    validation_commands: [],
+    approved_migrations: []
+  },
+  toolchains: {
+    enabled: false,
+    node: {
+      support_policy: 'supported',
+      update_ci: true,
+      update_runtime_files: true,
+      build_files: []
+    }
   }
 };
 

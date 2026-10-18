@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from './github-io.mjs';
 import { assertWriteTargetIsInstalledRepo } from './sync-upstream.mjs';
 
 export const STANDARD_LABELS = [

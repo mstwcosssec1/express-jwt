@@ -975,8 +975,9 @@ async function fetchUpstreamPackageMetadata(dep, { fetchImpl, state, offline }) 
 
 async function fetchOsvVulnerabilities(dependencies, { fetchImpl, offline }) {
   const vulnsByIndex = dependencies.map(() => []);
+  const checked = dependencies.map(() => false);
   if (offline || typeof fetchImpl !== 'function' || dependencies.length === 0) {
-    return vulnsByIndex;
+    return { vulnsByIndex, checked };
   }
 
   const queryableIndices = [];
@@ -995,7 +996,7 @@ async function fetchOsvVulnerabilities(dependencies, { fetchImpl, offline }) {
     }
   });
 
-  if (queries.length === 0) return vulnsByIndex;
+  if (queries.length === 0) return { vulnsByIndex, checked };
 
   const batchData = await safeFetchJson(fetchImpl, 'https://api.osv.dev/v1/querybatch', {
     method: 'POST',
@@ -1003,14 +1004,16 @@ async function fetchOsvVulnerabilities(dependencies, { fetchImpl, offline }) {
     body: JSON.stringify({ queries })
   });
 
-  if (batchData && Array.isArray(batchData.results)) {
+  if (batchData && Array.isArray(batchData.results) && batchData.results.length === queries.length) {
     batchData.results.forEach((res, qIdx) => {
       const depIdx = queryableIndices[qIdx];
-      if (depIdx !== undefined && Array.isArray(res?.vulns)) {
-        vulnsByIndex[depIdx] = res.vulns;
+      if (depIdx !== undefined && res && typeof res === 'object' &&
+          !Array.isArray(res) && !res.error && (res.vulns === undefined || Array.isArray(res.vulns))) {
+        vulnsByIndex[depIdx] = res.vulns || [];
+        checked[depIdx] = true;
       }
     });
-    return vulnsByIndex;
+    return { vulnsByIndex, checked };
   }
 
   for (let i = 0; i < queries.length; i++) {
@@ -1020,12 +1023,14 @@ async function fetchOsvVulnerabilities(dependencies, { fetchImpl, offline }) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(queries[i])
     });
-    if (singleData && Array.isArray(singleData.vulns)) {
-      vulnsByIndex[depIdx] = singleData.vulns;
+    if (singleData && typeof singleData === 'object' && !Array.isArray(singleData) &&
+        !singleData.error && (singleData.vulns === undefined || Array.isArray(singleData.vulns))) {
+      vulnsByIndex[depIdx] = singleData.vulns || [];
+      checked[depIdx] = true;
     }
   }
 
-  return vulnsByIndex;
+  return { vulnsByIndex, checked };
 }
 
 /**
@@ -1058,8 +1063,16 @@ export async function scanRepositoryDependencies({
   for (let i = 0; i < rawDeps.length; i++) {
     const dep = rawDeps[i];
     const ecoData = await fetchUpstreamPackageMetadata(dep, { fetchImpl, state, offline });
-    const vulns = osvResults[i] || [];
-    evaluatedDeps.push(evaluateDependencyHealth(dep, ecoData, vulns, policy));
+    const vulns = osvResults.vulnsByIndex[i] || [];
+    const metadata = state?.ecosystem_cache?.[`pkg:${dep.registry}:${dep.name}`];
+    evaluatedDeps.push({
+      ...evaluateDependencyHealth(dep, ecoData, vulns, policy),
+      evidence: {
+        advisory_checked: osvResults.checked[i],
+        metadata_available: !offline && Boolean(ecoData.latest_release_number) &&
+          (!metadata || Date.now() - Date.parse(metadata.fetchedAt) <= CACHE_TTL_MS)
+      }
+    });
   }
 
   const summary = {

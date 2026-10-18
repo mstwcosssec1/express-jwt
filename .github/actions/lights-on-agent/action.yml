@@ -3,7 +3,7 @@ description: "Composite action that runs the Lights On multi-engine autonomous m
 
 inputs:
   task:
-    description: "Lights On maintenance task name (e.g., bootstrap-threat-model, issue-responder, pr-reviewer, dependency-maintainer, security-remediator, docs-clarifier)"
+    description: "Task (e.g., bootstrap-threat-model, issue-responder, pr-reviewer, dependency-updater, dependency-migration-planner, dependency-migrator)"
     required: true
   tier:
     description: "Model routing tier: default or reasoning"
@@ -19,6 +19,10 @@ inputs:
     default: ""
   context_file:
     description: "Optional path (or comma-separated paths) to additional context files"
+    required: false
+    default: ""
+  dependency_selection_file:
+    description: "Trusted Step D1 selection for a bounded dependency update or approved migration"
     required: false
     default: ""
   output_file:
@@ -61,15 +65,15 @@ runs:
       with:
         node-version: "24"
 
-    - name: Restore and save Lights On cache
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+    - name: Restore shared Lights On state
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           /tmp/lights-on-cache
           /tmp/lights-on-threat-model
-        key: lights-on-cache-${{ github.repository }}-${{ github.run_id }}
+        key: lights-on-state-v2-${{ github.repository }}-${{ github.run_id }}-${{ github.run_attempt }}
         restore-keys: |
-          lights-on-cache-${{ github.repository }}-
+          lights-on-state-v2-${{ github.repository }}-
 
     - name: Check Lights On configuration and enabled state
       id: check-config
@@ -103,6 +107,7 @@ runs:
         INPUT_TIER: ${{ inputs.tier }}
         INPUT_EVENT_FILE: ${{ inputs.event_file }}
         INPUT_CONTEXT_FILE: ${{ inputs.context_file }}
+        INPUT_DEPENDENCY_SELECTION_FILE: ${{ inputs.dependency_selection_file }}
         INPUT_OUTPUT_FILE: ${{ inputs.output_file }}
         CONFIG_ENABLED: ${{ steps.check-config.outputs.enabled }}
         CHECK_PROVIDER: ${{ steps.check-config.outputs.provider }}
@@ -111,7 +116,7 @@ runs:
         LIGHTS_ON_SANDBOX_IMAGE: ${{ inputs.sandbox_image }}
       run: |
         if [ "$CONFIG_ENABLED" = "false" ] || [ "$LIGHTS_ON_ENABLED" = "false" ]; then
-          echo "Lights On is disabled (LIGHTS_ON_ENABLED=false); skipping agent execution."
+          node .github/lights-on/runner/workflow-report.mjs --title "Agent execution skipped" --message "Lights On is disabled; no agent or PR publication was performed."
           {
             echo "status=skipped"
             echo "provider=${CHECK_PROVIDER//[$'\r\n']/}"
@@ -133,6 +138,9 @@ runs:
         fi
         if [ -n "$INPUT_CONTEXT_FILE" ]; then
           args+=(--context-file "$INPUT_CONTEXT_FILE")
+        fi
+        if [ -n "$INPUT_DEPENDENCY_SELECTION_FILE" ]; then
+          args+=(--dependency-selection "$INPUT_DEPENDENCY_SELECTION_FILE")
         fi
 
         node .github/lights-on/runner/run-agent.mjs "${args[@]}"

@@ -10,9 +10,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { validateCommandRepoIsolation } from './sync-upstream.mjs';
 import { createAgentSandbox } from './agent-sandbox.mjs';
+import { createUsageAccumulator } from './usage.mjs';
 
 const DEFAULT_OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const DEFAULT_MODEL = 'anthropic/claude-sonnet-5.5';
@@ -133,60 +135,81 @@ export function resolveOpenRouterEndpoint(baseUrl = process.env.OPENROUTER_BASE_
 
 /**
  * Resolve a target path and verify it stays within workingDir (or allowed temp directory when allowTmp is true).
- * Resolves filesystem symlinks on existing paths/ancestors to prevent symlink traversal.
+ * Rejects symlinks, including dangling links, in every target path component.
  */
 export function resolveSafePath(targetPath, workingDir = process.cwd(), { allowTmp = false } = {}) {
   if (!targetPath || typeof targetPath !== 'string') {
     throw new Error('Path must be a non-empty string');
   }
-  const absWorkingDir = resolveRealOrLexical(path.resolve(workingDir));
+  const absWorkingDir = fs.realpathSync(path.resolve(workingDir));
   const lexicalTarget = path.resolve(absWorkingDir, targetPath);
-  const resolved = resolveRealOrLexical(lexicalTarget);
 
   const normalizedWorking = normalizeForComparison(absWorkingDir);
-  const normalizedTarget = normalizeForComparison(resolved);
+  const normalizedTarget = normalizeForComparison(lexicalTarget);
 
   const isInsideWorkingDir =
     normalizedTarget === normalizedWorking ||
     normalizedTarget.startsWith(normalizedWorking + path.sep);
 
   let isInsideTmp = false;
+  let absTmpDir;
   if (allowTmp) {
-    const absTmpDir = resolveRealOrLexical(path.resolve(os.tmpdir()));
+    absTmpDir = fs.realpathSync(path.resolve(os.tmpdir()));
     const normalizedOsTmp = normalizeForComparison(absTmpDir);
-    const posixResolved = resolved.replace(/\\/g, '/');
     isInsideTmp =
       normalizedTarget === normalizedOsTmp ||
-      normalizedTarget.startsWith(normalizedOsTmp + path.sep) ||
-      posixResolved === '/tmp' ||
-      posixResolved.startsWith('/tmp/');
+      normalizedTarget.startsWith(normalizedOsTmp + path.sep);
   }
 
   if (!isInsideWorkingDir && !isInsideTmp) {
     throw new Error(`Path traversal blocked: "${targetPath}" resolves outside workingDir "${absWorkingDir}"`);
   }
 
-  return resolved;
+  const root = isInsideWorkingDir ? absWorkingDir : absTmpDir;
+  let current = root;
+  const parts = path.relative(root, lexicalTarget).split(path.sep).filter(Boolean);
+  for (let index = 0; index < parts.length; index++) {
+    current = path.join(current, parts[index]);
+    const stat = fs.lstatSync(current, { throwIfNoEntry: false });
+    if (!stat) continue;
+    if (stat.isSymbolicLink()) throw new Error(`Symlink path blocked: "${targetPath}"`);
+    if (index < parts.length - 1 && !stat.isDirectory()) throw new Error('Path ancestor is not a directory.');
+    if (!stat.isDirectory() && !stat.isFile()) throw new Error('Special files are not permitted.');
+  }
+  return lexicalTarget;
 }
 
-function resolveRealOrLexical(absPath) {
+function readRegularFile(file, maxBytes) {
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
   try {
-    if (fs.existsSync(absPath)) {
-      return fs.realpathSync(absPath);
-    }
-    let current = path.dirname(absPath);
-    const suffixParts = [path.basename(absPath)];
-    while (current && current !== path.dirname(current)) {
-      if (fs.existsSync(current)) {
-        return path.join(fs.realpathSync(current), ...suffixParts.reverse());
-      }
-      suffixParts.push(path.basename(current));
-      current = path.dirname(current);
-    }
-  } catch {
-    // Fall back to lexical path if realpath fails
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) throw new Error('Only regular files may be read.');
+    const buffer = Buffer.alloc(Math.min(stat.size, maxBytes ?? stat.size));
+    return { content: buffer.subarray(0, fs.readSync(fd, buffer, 0, buffer.length, 0)).toString('utf8'), size: stat.size };
+  } finally { fs.closeSync(fd); }
+}
+
+function writeWorkspaceFile(file, content, workingDir) {
+  resolveSafePath(file, workingDir);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  resolveSafePath(file, workingDir);
+  const previous = fs.lstatSync(file, { throwIfNoEntry: false });
+  if (previous && (!previous.isFile() || previous.nlink !== 1)) throw new Error('Only single-link regular files may be replaced.');
+  const temporary = path.join(path.dirname(file), `.lights-on-${crypto.randomUUID()}.tmp`);
+  const fd = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL |
+    (fs.constants.O_NOFOLLOW || 0), previous ? previous.mode & 0o777 : 0o666);
+  try {
+    try {
+      if (previous) fs.fchmodSync(fd, previous.mode & 0o777);
+      fs.writeFileSync(fd, content, 'utf8');
+    } finally { fs.closeSync(fd); }
+    resolveSafePath(file, workingDir);
+    // Atomic replacement does not follow a final symlink even on Windows,
+    // where Node does not expose O_NOFOLLOW. Workers have already been stopped.
+    fs.renameSync(temporary, file);
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
   }
-  return absPath;
 }
 
 function normalizeForComparison(p) {
@@ -210,8 +233,8 @@ export function isProtectedPath(targetPath, workingDir = process.cwd(), env = pr
   if (env.ALLOW_WORKFLOW_EDIT === 'true') {
     return false;
   }
-  const absWorkingDir = resolveRealOrLexical(path.resolve(workingDir));
-  const resolved = resolveRealOrLexical(path.resolve(absWorkingDir, targetPath));
+  const absWorkingDir = fs.realpathSync(path.resolve(workingDir));
+  const resolved = resolveSafePath(targetPath, absWorkingDir);
   const rel = path.relative(absWorkingDir, resolved).replace(/\\/g, '/').replace(/^\.\//, '');
 
   return PROTECTED_AGENT_PATH_PATTERNS.some((pattern) => pattern.test(rel));
@@ -245,14 +268,7 @@ export function executeToolCall(toolName, rawArgs, { workingDir = process.cwd(),
           const entries = fs.readdirSync(resolved);
           return { ok: true, type: 'directory', entries };
         }
-        const buffer = Buffer.alloc(Math.min(stat.size, MAX_READ_BYTES));
-        const fd = fs.openSync(resolved, 'r');
-        let content;
-        try {
-          content = buffer.subarray(0, fs.readSync(fd, buffer, 0, buffer.length, 0)).toString('utf8');
-        } finally {
-          fs.closeSync(fd);
-        }
+        let { content } = readRegularFile(resolved, MAX_READ_BYTES);
         if (args.start_line !== undefined || args.end_line !== undefined) {
           const lines = content.split(/\r?\n/);
           const start = Math.max(1, Number(args.start_line) || 1);
@@ -274,9 +290,8 @@ export function executeToolCall(toolName, rawArgs, { workingDir = process.cwd(),
             error: `Protected path modification blocked: "${args.path}". Modifying protected workflow, runner, config, or threat-model files requires ALLOW_WORKFLOW_EDIT=true.`
           };
         }
-        fs.mkdirSync(path.dirname(resolved), { recursive: true });
-        fs.writeFileSync(resolved, String(args.content ?? ''), 'utf8');
-        const rel = path.relative(resolveRealOrLexical(path.resolve(workingDir)), resolved).replace(/\\/g, '/');
+        writeWorkspaceFile(resolved, String(args.content ?? ''), workingDir);
+        const rel = path.relative(fs.realpathSync(path.resolve(workingDir)), resolved).replace(/\\/g, '/');
         if (!rel.startsWith('..')) {
           filesChanged.add(rel);
         }
@@ -297,15 +312,15 @@ export function executeToolCall(toolName, rawArgs, { workingDir = process.cwd(),
         if (!fs.existsSync(resolved)) {
           return { ok: false, error: `File not found: ${args.path}` };
         }
-        const current = fs.readFileSync(resolved, 'utf8');
+        const { content: current } = readRegularFile(resolved);
         const oldStr = String(args.old_str ?? '');
         const newStr = String(args.new_str ?? '');
         if (!oldStr || !current.includes(oldStr)) {
           return { ok: false, error: `old_str not found in ${args.path}` };
         }
         const updated = current.replace(oldStr, () => newStr);
-        fs.writeFileSync(resolved, updated, 'utf8');
-        const rel = path.relative(resolveRealOrLexical(path.resolve(workingDir)), resolved).replace(/\\/g, '/');
+        writeWorkspaceFile(resolved, updated, workingDir);
+        const rel = path.relative(fs.realpathSync(path.resolve(workingDir)), resolved).replace(/\\/g, '/');
         if (!rel.startsWith('..')) {
           filesChanged.add(rel);
         }
@@ -417,14 +432,14 @@ export async function runOpenRouterAgent({
   ];
 
   let lastAssistantText = '';
-  let totalTokensUsed = 0;
-  let totalCostUsd = 0;
+  const usage = createUsageAccumulator();
 
   for (let turn = 0; turn < maxTurns; turn++) {
-    if (typeof maxTokensPerRun === 'number' && maxTokensPerRun > 0 && totalTokensUsed >= maxTokensPerRun) {
+    const used = usage.snapshot();
+    if (typeof maxTokensPerRun === 'number' && maxTokensPerRun > 0 && used.known_total_tokens >= maxTokensPerRun) {
       break;
     }
-    if (typeof maxCostPerRunUsd === 'number' && maxCostPerRunUsd > 0 && totalCostUsd >= maxCostPerRunUsd) {
+    if (typeof maxCostPerRunUsd === 'number' && maxCostPerRunUsd > 0 && used.known_cost_usd >= maxCostPerRunUsd) {
       break;
     }
 
@@ -432,47 +447,39 @@ export async function runOpenRouterAgent({
       model, messages, tools: OPENROUTER_TOOLS, tool_choice: 'auto', temperature: 0.1
     };
     let data;
-    if (complete) {
-      data = await complete(request);
-    } else {
-    const response = await fetchImpl(endpoint, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://github.com/lights-on',
-        'X-Title': 'Lights On Autonomous Maintenance Agent'
-      },
-      body: JSON.stringify(request),
-      signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(120_000) : undefined
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => '');
-      throw new Error(`OpenRouter API error (${response.status}): ${errorText}`);
-    }
-
-    data = await response.json();
-    }
-    if (data?.usage) {
-      const turnTokens =
-        Number(
-          data.usage.total_tokens ??
-            ((Number(data.usage.prompt_tokens) || 0) + (Number(data.usage.completion_tokens) || 0))
-        ) || 0;
-      totalTokensUsed += turnTokens;
-      if (typeof data.usage.cost === 'number') {
-        totalCostUsd += data.usage.cost;
-      } else if (typeof data.usage.total_cost === 'number') {
-        totalCostUsd += data.usage.total_cost;
+    try {
+      if (complete) {
+        data = await complete(request);
       } else {
-        totalCostUsd += (turnTokens / 1_000_000) * 5.0;
+        const response = await fetchImpl(endpoint, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': 'https://github.com/lights-on',
+            'X-Title': 'Lights On Autonomous Maintenance Agent'
+          },
+          body: JSON.stringify(request),
+          signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(120_000) : undefined
+        });
+        if (!response.ok) {
+          const errorText = await response.text().catch(() => '');
+          throw new Error(`OpenRouter API error (${response.status}): ${errorText}`);
+        }
+        data = await response.json();
       }
+    } catch (err) {
+      usage.add(err.usage);
+      err.usage = usage.snapshot();
+      throw err;
     }
+    usage.add(data?.usage);
     const choice = data?.choices?.[0];
     const message = choice?.message;
     if (!message) {
-      throw new Error('OpenRouter response did not contain a valid message');
+      const error = new Error('Provider response did not contain a valid message');
+      error.usage = usage.snapshot();
+      throw error;
     }
 
     if (typeof message.content === 'string' && message.content.trim()) {
@@ -494,7 +501,7 @@ export async function runOpenRouterAgent({
         ...parsedFromContent,
         provider: 'openrouter',
         model,
-        usage: { total_tokens: totalTokensUsed, cost_usd: Number(totalCostUsd.toFixed(6)) }
+        usage: usage.snapshot()
       };
       if (outputPath) {
         const absOut = path.resolve(workingDir, outputPath);
@@ -520,7 +527,7 @@ export async function runOpenRouterAgent({
           ...toolOutput.result,
           provider: 'openrouter',
           model,
-          usage: { total_tokens: totalTokensUsed, cost_usd: Number(totalCostUsd.toFixed(6)) }
+          usage: usage.snapshot()
         };
         if (outputPath) {
           const absOut = path.resolve(workingDir, outputPath);
@@ -550,11 +557,11 @@ export async function runOpenRouterAgent({
     breaking_api_change: false,
     gate_results: {},
     files_changed: Array.from(filesChanged),
-    usage: { total_tokens: totalTokensUsed, cost_usd: Number(totalCostUsd.toFixed(6)) },
+    usage: usage.snapshot(),
     details: {
       max_turns_reached: true,
-      tokens_used: totalTokensUsed,
-      cost_usd: Number(totalCostUsd.toFixed(6))
+      tokens_used: usage.snapshot().total_tokens,
+      cost_usd: usage.snapshot().cost_usd
     }
   };
 

@@ -10,16 +10,18 @@
  * Lights On MUST NEVER write to any repository other than the one it is installed in
  * (`installedRepo` / `GITHUB_REPOSITORY`), including `upstreamRepo`. All interactions
  * with `upstreamRepo` are strictly read-only (`GET`) requests, and upstream issue/PR
- * references in local comments/bodies are backtick-escaped (`foo/bar#123`) so GitHub
- * does not emit cross-repository timeline pings on the upstream repository.
+ * externally sourced comments/bodies are published as safely fenced literal text
+ * rather than parsed Markdown links, including entity-encoded references.
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from './github-io.mjs';
+import { literalPublicationBody } from './publication-text.mjs';
 import { fileURLToPath } from 'node:url';
 
 import { loadConfig, sanitizeGitHubOutputValue } from './load-config.mjs';
+import { reportWorkflowEvent } from './workflow-report.mjs';
 import {
   LABELS,
   isMaintainerAssociation,
@@ -60,7 +62,7 @@ export function normalizeRepoFullName(repo) {
 export function parseGitHubRepoFromRemoteUrl(remoteUrl) {
   if (!remoteUrl || typeof remoteUrl !== 'string') return null;
   const trimmed = remoteUrl.trim();
-  const httpsMatch = trimmed.match(/github\.com[/:]([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?$/i);
+  const httpsMatch = trimmed.match(/^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/i);
   if (httpsMatch && httpsMatch[1]) {
     return normalizeRepoFullName(httpsMatch[1]);
   }
@@ -248,61 +250,14 @@ export function formatSafeUpstreamRef(upstreamRepo, number) {
   return `\`${norm}#${Number(number)}\``;
 }
 
-/**
- * Neutralize bare cross-repository references or URLs to `upstreamRepo` (or any non-installed
- * repository) in markdown text by wrapping them in inline code backticks so GitHub never posts
- * cross-reference events to external/upstream repositories.
- */
+/** Legacy helper name: preserve external content as literal Markdown, not parsed links. */
 export function neutralizeCrossRepoAutoLinks(
   text,
   upstreamRepo,
   { installedRepo = process.env.GITHUB_REPOSITORY || '' } = {}
 ) {
   if (!text || typeof text !== 'string') return '';
-  const normUpstream = normalizeRepoFullName(upstreamRepo);
-  const normInstalled = normalizeRepoFullName(installedRepo);
-
-  let sanitized = text;
-
-  if (normUpstream) {
-    const escapedRepo = normUpstream.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const refRegex = new RegExp(`(?<!\`)(?:\\b)${escapedRepo}#(\\d+)(?!\`)`, 'gi');
-    sanitized = sanitized.replace(refRegex, `\`${normUpstream}#$1\``);
-
-    const urlRegex = new RegExp(
-      `(?<!\`)https?:\\/\\/github\\.com\\/${escapedRepo}\\/(issues|pull|discussions)\\/(\\d+)(?!\`)`,
-      'gi'
-    );
-    sanitized = sanitized.replace(urlRegex, `\`https://github.com/${normUpstream}/$1/$2\``);
-  }
-
-  if (normInstalled) {
-    // Also neutralize any bare owner/repo#123 or github.com/owner/repo/(issues|pull|discussions)/123
-    // targeting any repository other than normInstalled.
-    sanitized = sanitized.replace(
-      /(?<!`)\b([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#(\d+)\b(?!`)/g,
-      (full, repoCandidate, num) => {
-        const normCandidate = normalizeRepoFullName(repoCandidate);
-        if (normCandidate && normCandidate.toLowerCase() !== normInstalled.toLowerCase()) {
-          return `\`${normCandidate}#${num}\``;
-        }
-        return full;
-      }
-    );
-
-    sanitized = sanitized.replace(
-      /(?<!`)https?:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/(issues|pull|discussions)\/(\d+)(?!`)/gi,
-      (full, repoCandidate, kind, num) => {
-        const normCandidate = normalizeRepoFullName(repoCandidate);
-        if (normCandidate && normCandidate.toLowerCase() !== normInstalled.toLowerCase()) {
-          return `\`https://github.com/${normCandidate}/${kind}/${num}\``;
-        }
-        return full;
-      }
-    );
-  }
-
-  return sanitized;
+  return literalPublicationBody(text);
 }
 
 async function fetchGitHubApiGet(endpointPath, { token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN || '', fetchImpl = globalThis.fetch } = {}) {
@@ -878,7 +833,12 @@ export async function syncUpstream({
           localIssueNumber: localNumber,
           url: out
         });
+        reportWorkflowEvent({ title: 'Upstream tracking issue created',
+          message: `Created local tracking issue for ${resolution.upstreamRepo}#${item.number}.`,
+          url: out, details: { Repository: safeInstalled, 'Issue title': item.title } }, { env });
       } catch (err) {
+        reportWorkflowEvent({ level: 'warning', title: 'Upstream issue mirroring failed',
+          message: `Could not mirror upstream item #${item.number}: ${err.message}` }, { env });
         console.warn(`Warning: failed to mirror upstream item #${item.number} locally:`, err.message);
       }
     }
@@ -926,6 +886,7 @@ async function runCli() {
   });
 
   if (!res.hasUpstream) {
+    reportWorkflowEvent({ title: 'Upstream sync skipped', message: `No upstream selected (${res.source}); no tracking issues created.` });
     if (emitGitHubOutput && process.env.GITHUB_OUTPUT) {
       const out = [
         'has_upstream=false',
@@ -935,6 +896,7 @@ async function runCli() {
       ];
       fs.appendFileSync(process.env.GITHUB_OUTPUT, out.join('\n') + '\n', 'utf8');
     }
+
     console.log(JSON.stringify(res, null, 2));
     return;
   }
@@ -952,6 +914,10 @@ async function runCli() {
     fs.appendFileSync(process.env.GITHUB_OUTPUT, out.join('\n') + '\n', 'utf8');
   }
 
+  if (res.createdLocalIssues.length === 0) {
+    reportWorkflowEvent({ title: 'Upstream sync completed', message: 'No local tracking issues were created.',
+      details: { 'Upstream repository': res.upstreamRepo, 'Unsynced candidates': res.unsyncedCount } });
+  }
   console.log(
     JSON.stringify(
       {

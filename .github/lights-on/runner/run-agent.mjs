@@ -18,12 +18,14 @@ import { inspectThreatModel } from './ensure-threat-model.mjs';
 import { runOpenRouterAgent } from './openrouter-agent.mjs';
 import { createAgentSandbox } from './agent-sandbox.mjs';
 import { createProviderCompletion } from './provider-completion.mjs';
+import { DEPENDENCY_TASKS, approvedMigration, validateDependencyCandidate } from './dependency-work.mjs';
+import { reportWorkflowEvent } from './workflow-report.mjs';
+import { createUsageAccumulator, usageSummary } from './usage.mjs';
+import { reserveAgentRun, settleAgentRun } from './run-budget.mjs';
+import { allowAgentEvent } from './event-policy.mjs';
 import {
   loadState,
-  saveState,
-  checkBudgetAndRateLimits,
-  recordUsage,
-  recordAttempt
+  checkBudgetAndRateLimits
 } from './state-store.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -63,6 +65,7 @@ export function assemblePrompt({
   task = 'issue-responder',
   repoRoot = process.cwd(),
   promptFile,
+  promptRoot,
   contextFiles = [],
   eventPayload,
   extraContext = {},
@@ -74,7 +77,8 @@ export function assemblePrompt({
   const sections = [];
 
   // 1. Load system-core.md
-  const systemCorePath = path.join(absRepoRoot, '.github', 'lights-on', 'prompts', 'system-core.md');
+  const prompts = promptRoot || path.join(absRepoRoot, '.github', 'lights-on', 'prompts');
+  const systemCorePath = path.join(prompts, 'system-core.md');
   if (fs.existsSync(systemCorePath)) {
     sections.push(fs.readFileSync(systemCorePath, 'utf8').trim());
   } else {
@@ -90,7 +94,7 @@ export function assemblePrompt({
   // 2. Load task-specific prompt
   const resolvedPromptFile = promptFile
     ? path.resolve(absRepoRoot, promptFile)
-    : path.join(absRepoRoot, '.github', 'lights-on', 'prompts', `${task}.md`);
+    : path.join(prompts, `${task}.md`);
 
   if (fs.existsSync(resolvedPromptFile)) {
     sections.push(`# Task Instructions (${task})\n\n${fs.readFileSync(resolvedPromptFile, 'utf8').trim()}`);
@@ -179,7 +183,7 @@ export function assemblePrompt({
       ? `- Upstream Reference Repository (STRICTLY READ-ONLY): \`${upstreamRepo}\``
       : '- Upstream Reference Repository (if any): STRICTLY READ-ONLY.',
     '- NEVER push, open PRs, create issues, post comments, or mutate state on any repository other than the Installed Repository.',
-    '- When referencing upstream issues, PRs, or URLs in local issue bodies, PR descriptions, or commit messages, ALWAYS wrap them in inline code backticks (e.g., `` `owner/repo#42` `` or `` `https://github.com/owner/repo/issues/42` ``) so GitHub does not generate cross-reference timeline notifications on the upstream repository.'
+    '- Reference upstream items only as data. The trusted publication boundary renders bodies literally and neutralizes reference syntax in titles/commit messages; do not try to create active cross-repository links or mentions.'
   ];
   sections.push(isolationLines.join('\n'));
 
@@ -265,13 +269,15 @@ export function normalizeAgentResult(rawResult, { provider = 'copilot', model = 
  */
 export async function runAgent(options = {}) {
   const {
-    task = 'issue-responder',
+    task: requestedTask = 'issue-responder',
     tier = 'default',
     repoRoot = process.cwd(),
     workingDir,
     configPath,
     promptFile,
+    promptRoot,
     contextFiles = [],
+    dependencySelectionFile,
     eventFile,
     eventPayload: directEventPayload,
     extraContext = {},
@@ -281,8 +287,10 @@ export async function runAgent(options = {}) {
     dryRun: explicitDryRun,
     env = process.env,
     spawnImpl = spawnSync,
-    fetchImpl = globalThis.fetch
+    fetchImpl = globalThis.fetch,
+    sandboxFactory = createAgentSandbox
   } = options;
+  const task = requestedTask === 'dependency-maintainer' ? 'dependency-migration-planner' : requestedTask;
 
   const absRepoRoot = path.resolve(repoRoot);
   const effectiveWorkingDir = workingDir ? path.resolve(workingDir) : absRepoRoot;
@@ -291,6 +299,11 @@ export async function runAgent(options = {}) {
     : path.join(absRepoRoot, '.github', 'lights-on', 'tmp', 'agent-result.json');
 
   const config = loadConfig({ configPath, repoRoot: absRepoRoot, env });
+  const maxInputBytes = Number(config.limits.max_input_bytes);
+  if (!Number.isSafeInteger(maxInputBytes) || maxInputBytes < 1) throw new Error('Invalid max_input_bytes limit.');
+  if (!Number.isSafeInteger(config.limits.max_model_calls_per_run) || config.limits.max_model_calls_per_run < 1) {
+    throw new Error('Invalid max_model_calls_per_run limit.');
+  }
   const resolution = resolveProvider(config, env, tier);
 
   const primaryProvider = explicitProvider || resolution.provider || 'copilot';
@@ -316,11 +329,21 @@ export async function runAgent(options = {}) {
     return disabledResult;
   }
 
+  const selection = dependencySelectionFile
+    ? JSON.parse(fs.readFileSync(path.resolve(effectiveWorkingDir, dependencySelectionFile), 'utf8')) : null;
+  if (['dependency-updater', 'dependency-migrator'].includes(task) &&
+      (selection?.status !== 'ready' || selection.task !== task)) {
+    throw new Error(`${task} requires a trusted dependency selection file from Step D1.`);
+  }
+  if (task === 'dependency-migrator') approvedMigration(config, selection.plan?.id);
+  const dependencyTask = DEPENDENCY_TASKS.includes(task);
+
   // Load event payload from eventFile if provided
   let eventPayload = directEventPayload;
   if (eventPayload === undefined && eventFile) {
     const absEventFile = path.resolve(effectiveWorkingDir, eventFile);
     if (fs.existsSync(absEventFile)) {
+      if (fs.statSync(absEventFile).size > maxInputBytes) throw new Error('Event input exceeds max_input_bytes; refusing paid inference.');
       const rawEvent = fs.readFileSync(absEventFile, 'utf8');
       try {
         eventPayload = JSON.parse(rawEvent);
@@ -329,17 +352,28 @@ export async function runAgent(options = {}) {
       }
     }
   }
+  if (Buffer.byteLength(JSON.stringify(eventPayload ?? null)) > maxInputBytes) throw new Error('Event input exceeds max_input_bytes.');
+  const access = allowAgentEvent({ eventName: env.GITHUB_EVENT_NAME, config,
+    event: task === 'pr-reviewer' && eventPayload?.number ? { pull_request: eventPayload } : eventPayload || {} });
+  if (!access.allowed) {
+    const skipped = normalizeAgentResult({ status: 'skipped', summary: access.reason, action_taken: 'event_gated' },
+      { provider: primaryProvider, model: primaryModel, task });
+    fs.mkdirSync(path.dirname(resolvedOutputPath), { recursive: true });
+    fs.writeFileSync(resolvedOutputPath, JSON.stringify(skipped));
+    return skipped;
+  }
 
   // Check cost budget & rate limits in state-store before invoking LLM
   const stateFilePath = options.stateFile || env.LIGHTS_ON_STATE_FILE;
   const state = loadState(stateFilePath ? { stateFile: stateFilePath } : {});
   const itemKey =
-    options.itemKey ||
+    selection?.stateKey || selection?.key || options.itemKey ||
     (eventPayload && typeof eventPayload === 'object' && eventPayload.issue?.number
       ? `issue:${eventPayload.issue.number}`
       : eventPayload && typeof eventPayload === 'object' && eventPayload.pull_request?.number
         ? `pr:${eventPayload.pull_request.number}`
-        : null);
+        : task === 'pr-reviewer' && eventPayload?.number ? `pr:${eventPayload.number}` : null);
+  const budgetFile = stateFilePath || process.env.LIGHTS_ON_STATE_FILE || '/tmp/lights-on-cache/state.json';
 
   if (env.LIGHTS_ON_FORCE !== 'true') {
     const budgetCheck = checkBudgetAndRateLimits(state, config, { task, itemKey });
@@ -365,17 +399,23 @@ export async function runAgent(options = {}) {
   }
 
   // The prompt is data for inference, never a script executed by the controller.
+  for (const file of [...contextFiles, ...(dependencySelectionFile ? [dependencySelectionFile] : [])]) {
+    const absolute = path.resolve(absRepoRoot, file);
+    if (fs.existsSync(absolute) && fs.statSync(absolute).size > maxInputBytes) throw new Error('Context input exceeds max_input_bytes.');
+  }
   const assembledPrompt = assemblePrompt({
     task,
     repoRoot: absRepoRoot,
     promptFile,
-    contextFiles,
+    promptRoot,
+    contextFiles: [...contextFiles, ...(dependencySelectionFile ? [dependencySelectionFile] : [])],
     eventPayload,
     extraContext,
     outputPath: resolvedOutputPath,
     installedRepo: env.GITHUB_REPOSITORY || process.env.GITHUB_REPOSITORY || '',
     upstreamRepo: env.LIGHTS_ON_UPSTREAM_REPO || config?.upstream?.repo || ''
   });
+  if (Buffer.byteLength(assembledPrompt) > maxInputBytes) throw new Error('Assembled prompt exceeds max_input_bytes; no model call made.');
 
   const isDryRun =
     Boolean(explicitDryRun) ||
@@ -420,6 +460,19 @@ export async function runAgent(options = {}) {
     return dryRunResult;
   }
 
+  const reservation = await reserveAgentRun({ stateFile: budgetFile, config, task, itemKey });
+  if (!reservation.allowed) {
+    const skipped = normalizeAgentResult({ status: 'skipped', summary: reservation.reason,
+      action_taken: 'rate_limited', rate_limit: reservation }, { provider: primaryProvider, model: primaryModel, task });
+    fs.mkdirSync(path.dirname(resolvedOutputPath), { recursive: true });
+    fs.writeFileSync(resolvedOutputPath, JSON.stringify(skipped));
+    return skipped;
+  }
+  let modelCalls = 0;
+  const beforeModelCall = () => {
+    if (++modelCalls > config.limits.max_model_calls_per_run) throw new Error('Model-call limit reached across providers and format retries.');
+  };
+
   // Build ordered list of candidate providers (primary + fallbacks)
   const fallbackList = Array.isArray(config?.engine?.fallback_providers) && config.engine.fallback_providers.length > 0
     ? config.engine.fallback_providers
@@ -427,10 +480,11 @@ export async function runAgent(options = {}) {
 
   const providerChain = [
     primaryProvider,
-    ...fallbackList.filter((p) => p && p !== primaryProvider)
+    ...(dependencyTask ? [] : fallbackList.filter((p) => p && p !== primaryProvider))
   ];
 
   const errors = [];
+  const runUsage = createUsageAccumulator();
 
   for (let idx = 0; idx < providerChain.length; idx++) {
     const candidateProvider = providerChain[idx];
@@ -443,6 +497,9 @@ export async function runAgent(options = {}) {
         );
     const candidateModel = idx === 0 ? primaryModel : candidateResolution.model;
 
+    let candidateUsage;
+    let usageAdded = false;
+    let attemptFinished = false;
     try {
       if (fs.existsSync(resolvedOutputPath)) {
         try {
@@ -452,8 +509,12 @@ export async function runAgent(options = {}) {
         }
       }
 
-      const readOnly = task === 'pr-reviewer' || env.LIGHTS_ON_READ_ONLY === 'true' || env.LIGHTS_ON_READ_ONLY === '1';
-      const sandbox = createAgentSandbox({ repoRoot: effectiveWorkingDir, image: env.LIGHTS_ON_SANDBOX_IMAGE || undefined });
+      const readOnly = task === 'pr-reviewer' || task === 'dependency-migration-planner' ||
+        env.LIGHTS_ON_READ_ONLY === 'true' || env.LIGHTS_ON_READ_ONLY === '1';
+      const sandbox = sandboxFactory({ repoRoot: effectiveWorkingDir, image: env.LIGHTS_ON_SANDBOX_IMAGE || undefined });
+      const taskTurnLimit = { 'dependency-updater': config.dependencies.update_max_turns,
+        'dependency-migration-planner': config.dependencies.migration_plan_max_turns,
+        'dependency-migrator': config.dependencies.migration_max_turns }[task];
       let rawAgentOutput;
       try {
         rawAgentOutput = await runOpenRouterAgent({
@@ -461,11 +522,12 @@ export async function runAgent(options = {}) {
           model: candidateModel,
           apiKey: 'controller-managed',
           workingDir: sandbox.workspace,
-          maxTurns: Number(config?.limits?.max_turns_per_run) || 25,
+          maxTurns: Math.min(Number(config?.limits?.max_turns_per_run) || 25, Number(taskTurnLimit) || 25),
           maxTokensPerRun: Number(config?.limits?.max_tokens_per_run) || 100000,
           maxCostPerRunUsd: Number(config?.limits?.max_cost_per_run_usd) || 2.0,
           fetchImpl,
-          complete: createProviderCompletion({ provider: candidateProvider, model: candidateModel, env, fetchImpl, spawnImpl }),
+          complete: createProviderCompletion({ provider: candidateProvider, model: candidateModel, env, fetchImpl, spawnImpl,
+            maxInputBytes, maxOutputTokens: config.limits.max_output_tokens, beforeModelCall }),
           runCommand: (command) => sandbox.run(command),
           env: {
             LIGHTS_ON_READ_ONLY: readOnly ? 'true' : 'false',
@@ -474,11 +536,39 @@ export async function runAgent(options = {}) {
             LIGHTS_ON_UPSTREAM_REPO: env.LIGHTS_ON_UPSTREAM_REPO
           }
         });
+        candidateUsage = rawAgentOutput.usage;
         rawAgentOutput.provider = candidateProvider;
-        rawAgentOutput.files_changed = readOnly ? [] : sandbox.apply({ allowThreatModel: task === 'bootstrap-threat-model' });
+        if (dependencyTask) delete rawAgentOutput.dependency_validation;
+        if (selection && !readOnly) {
+          try {
+            if (rawAgentOutput.breaking_api_change || rawAgentOutput.details?.max_turns_reached ||
+                rawAgentOutput.status !== 'completed' || ['NEEDS_HUMAN', 'NEEDS-INFO', 'MODEL-GAP'].includes(rawAgentOutput.disposition)) {
+              throw new Error('Agent did not produce a complete non-breaking dependency candidate.');
+            }
+            rawAgentOutput.dependency_validation = await validateDependencyCandidate({
+              selection, repoRoot: effectiveWorkingDir, candidateRoot: sandbox.workspace, config,
+              image: env.LIGHTS_ON_SANDBOX_IMAGE || undefined, fetchImpl, sandboxFactory
+            });
+          } catch (err) {
+            console.warn(`Dependency candidate blocked: ${err.message}`);
+            rawAgentOutput.status = 'blocked';
+            rawAgentOutput.action_taken = 'dependency_blocked';
+            rawAgentOutput.disposition = 'NEEDS_HUMAN';
+            rawAgentOutput.dependency_validation = { status: 'blocked', key: selection.key, reason: err.message };
+            rawAgentOutput.gate_results = { ...DEFAULT_GATE_RESULTS };
+            rawAgentOutput.files_changed = [];
+          }
+        }
+        if (rawAgentOutput.dependency_validation?.status !== 'blocked') {
+          rawAgentOutput.files_changed = readOnly ? [] : sandbox.apply({ allowThreatModel: task === 'bootstrap-threat-model' });
+        }
       } finally {
         sandbox.dispose();
       }
+      runUsage.add(candidateUsage);
+      usageAdded = true;
+      attemptFinished = true;
+      rawAgentOutput.usage = runUsage.snapshot();
 
       const normalized = normalizeAgentResult(rawAgentOutput, {
         provider: candidateProvider,
@@ -488,25 +578,23 @@ export async function runAgent(options = {}) {
 
       fs.mkdirSync(path.dirname(resolvedOutputPath), { recursive: true });
       fs.writeFileSync(resolvedOutputPath, JSON.stringify(normalized, null, 2), 'utf8');
-      try {
-        const tokensUsed = Number(normalized?.usage?.total_tokens ?? normalized?.details?.tokens_used ?? 0) || 0;
-        const costUsd = Number(normalized?.usage?.cost_usd ?? normalized?.details?.cost_usd ?? 0) || 0;
-        recordUsage(state, { task, tokensUsed, costUsd });
-        if (itemKey) {
-          recordAttempt(state, itemKey, { task, provider: candidateProvider });
-        }
-        if (stateFilePath) {
-          saveState(state, { stateFile: stateFilePath });
-        }
-      } catch {}
+      await settleAgentRun({ stateFile: budgetFile, id: reservation.id, task, usage: normalized.usage, outcome: 'completed' });
       return normalized;
     } catch (err) {
+      if (!usageAdded && (err.usage || candidateUsage)) runUsage.add(err.usage || candidateUsage);
+      if (attemptFinished) {
+        err.usage = runUsage.snapshot();
+        throw err;
+      }
       errors.push({ provider: candidateProvider, error: err.message });
     }
   }
 
   const errorSummary = errors.map((e) => `${e.provider}: ${e.error}`).join('; ');
-  throw new Error(`All configured Lights On providers failed (${errorSummary})`);
+  const error = new Error(`All configured Lights On providers failed (${errorSummary})`);
+  error.usage = runUsage.snapshot();
+  await settleAgentRun({ stateFile: budgetFile, id: reservation.id, task, usage: error.usage, outcome: 'failed' });
+  throw error;
 }
 
 function parseCliArgs(argv) {
@@ -530,6 +618,8 @@ function parseCliArgs(argv) {
       if (val) {
         opts.contextFiles.push(...val.split(',').map((s) => s.trim()).filter(Boolean));
       }
+    } else if (arg === '--dependency-selection' && argv[i + 1]) {
+      opts.dependencySelectionFile = argv[++i];
     } else if (arg === '--output' && argv[i + 1]) {
       opts.outputPath = argv[++i];
     } else if (arg === '--provider' && argv[i + 1]) {
@@ -551,6 +641,16 @@ if (isMain) {
   const cli = parseCliArgs(process.argv.slice(2));
   runAgent(cli)
     .then((result) => {
+      reportWorkflowEvent({
+        level: result.status === 'blocked' ? 'warning' : 'notice',
+        title: result.dry_run ? 'Agent dry run completed' : `Agent task ${result.status}`,
+        message: `${result.task}: ${result.files_changed.length} candidate file(s) prepared. ` +
+          'This step does not publish a PR; publication outcomes are reported separately.',
+        details: { Provider: result.provider, Model: result.model, Status: result.status,
+          ...(result.usage ? usageSummary(result.usage) : {}),
+          Reason: result.dependency_validation?.reason || result.rate_limit?.reason ||
+            (result.status === 'skipped' ? result.summary : '') }
+      });
       if (process.env.GITHUB_OUTPUT) {
         const lines = [
           `status=${sanitizeGitHubOutputValue(result.status || '')}`,
@@ -565,6 +665,8 @@ if (isMain) {
       console.log(JSON.stringify(result, null, 2));
     })
     .catch((err) => {
+      reportWorkflowEvent({ level: 'error', title: 'Agent task failed',
+        message: `${cli.task}: ${err.message}`, details: err.usage ? usageSummary(err.usage) : {} });
       console.error(`run-agent error: ${err.message}`);
       process.exit(1);
     });

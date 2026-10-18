@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { detectPublishTargets, publishRelease } from './publish-release.mjs';
+import { loadConfig } from './load-config.mjs';
 
 const EXTENSIONS = {
   npm: /\.tgz$/, pypi: /(?:\.whl|\.tar\.gz)$/, crates: /\.crate$/,
@@ -61,7 +62,7 @@ export function buildReleaseArtifacts({ repoRoot, directory, version, ecosystem,
   return manifest;
 }
 
-export function validateReleaseArtifacts({ directory, version, ecosystem }) {
+export function validateReleaseArtifacts({ directory, version, ecosystem, repoRoot, env = process.env }) {
   if (!EXTENSIONS[ecosystem]) throw new Error('Unsupported registry.');
   const manifestPath = path.join(directory, 'manifest.json');
   if (!fs.lstatSync(manifestPath).isFile() || fs.lstatSync(manifestPath).isSymbolicLink()) throw new Error('Invalid artifact manifest.');
@@ -83,7 +84,24 @@ export function validateReleaseArtifacts({ directory, version, ecosystem }) {
   }
   if (fs.readdirSync(directory).some((name) => !names.has(name))) throw new Error('Unexpected file in release artifact.');
   if (!manifest.files.some((entry) => EXTENSIONS[ecosystem].test(entry.name))) throw new Error('No package artifact.');
-  return manifest.files.map((entry) => path.join(directory, entry.name));
+  const files = manifest.files.map((entry) => path.join(directory, entry.name));
+  if (!repoRoot) throw new Error('Artifact identity verification requires the trusted release checkout.');
+  const targets = detectPublishTargets(repoRoot).filter((target) => target.ecosystem === ecosystem);
+  if (!targets.length) throw new Error('No trusted release targets for the artifacts.');
+  const script = fileURLToPath(new URL('./package-identity.py', import.meta.url));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lights-on-identity-'));
+  try {
+    execFileSync(process.platform === 'win32' ? 'python' : 'python3', ['-I', script], {
+      cwd: home, encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { PATH: env.PATH || process.env.PATH, SystemRoot: env.SystemRoot || process.env.SystemRoot, HOME: home, USERPROFILE: home },
+      input: JSON.stringify({ repo_root: path.resolve(repoRoot), version, ecosystem, files: files.map((file) => path.resolve(file)),
+        targets, package_names: loadConfig({ repoRoot, env: {} }).release.package_names || {} })
+    });
+  } catch {
+    throw new Error('Distribution identity verification failed; install Python 3.11+ (and Ruby with Psych for RubyGems) and ensure all package metadata matches the trusted release names/version.');
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+  return files;
 }
 
 export function registryEnvironment(ecosystem, env, home) {
@@ -102,7 +120,7 @@ export function registryEnvironment(ecosystem, env, home) {
 
 export async function uploadReleaseArtifacts({ repoRoot, directory, version, ecosystem, env = process.env,
   execFileImpl = execFileSync, fetchImpl = globalThis.fetch }) {
-  const files = validateReleaseArtifacts({ directory, version, ecosystem });
+  const files = validateReleaseArtifacts({ directory, version, ecosystem, repoRoot, env });
   const targets = detectPublishTargets(repoRoot).filter((t) => t.ecosystem === ecosystem);
   if (!targets.length) throw new Error('Artifact registry does not match trusted release sources.');
   if (ecosystem !== 'npm' && !env.REGISTRY_TOKEN) throw new Error(`Missing publishing token for ${ecosystem}.`);
@@ -113,7 +131,7 @@ export async function uploadReleaseArtifacts({ repoRoot, directory, version, eco
     const run = (cmd, args) => execFileImpl(cmd, args, { cwd: home, env: cleanEnv, stdio: 'pipe' });
     if (ecosystem === 'npm') {
       fs.writeFileSync(path.join(home, '.npmrc'), env.REGISTRY_TOKEN ? '//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}\n' : '');
-      for (const file of files) run('npm', ['publish', file, '--ignore-scripts', '--access', 'public',
+      for (const file of files) run('npm', ['publish', file, '--ignore-scripts', '--strict-ssl=true', '--access', 'public',
         '--registry', 'https://registry.npmjs.org', '--userconfig', path.join(home, '.npmrc'),
         ...(env.ACTIONS_ID_TOKEN_REQUEST_TOKEN ? ['--provenance'] : [])]);
     } else if (ecosystem === 'nuget') {

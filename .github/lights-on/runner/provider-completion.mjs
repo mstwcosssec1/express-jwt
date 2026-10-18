@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { stripVTControlCharacters } from 'node:util';
+import { createUsageAccumulator, normalizeCopilotUsage } from './usage.mjs';
 
 const COPILOT_RESPONSE_ATTEMPTS = 3;
 const COPILOT_COMPLETION_TIMEOUT_MS = 120000;
@@ -16,7 +17,8 @@ export function copilotInferenceSpec(home, model) {
     args: ['--available-tools=lights_on_no_builtin_tools', '--disable-builtin-mcps', '--no-custom-instructions',
       '--no-ask-user', '--no-auto-update', '--deny-tool', 'shell',
       '--deny-tool', 'write', '--deny-tool', 'url', '--silent',
-      '--model', model, '--log-level', 'none'],
+      '--model', model, '--log-level', 'none',
+      '--usage-output-file', path.join(home, 'usage.json')],
     env: {
       PATH: process.env.PATH, SystemRoot: process.env.SystemRoot,
       HOME: home, USERPROFILE: home, COPILOT_HOME: home,
@@ -81,21 +83,28 @@ function parseCopilotToolSelection(output, tools) {
   return { call };
 }
 
-export function createProviderCompletion({ provider, model, env, fetchImpl = globalThis.fetch, spawnImpl = spawnSync }) {
+export function createProviderCompletion({ provider, model, env, fetchImpl = globalThis.fetch, spawnImpl = spawnSync,
+  maxInputBytes = 262144, maxOutputTokens = 8192, beforeModelCall = () => {} }) {
+  if (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 1 ||
+      !Number.isSafeInteger(maxInputBytes) || maxInputBytes < 1) throw new Error('Invalid inference size limits.');
   const openAiHistory = [];
   let seenMessages = 0;
   const post = async (url, headers, body) => {
+    const serialized = JSON.stringify(body);
+    if (Buffer.byteLength(serialized) > maxInputBytes) throw new Error('Provider input exceeds max_input_bytes.');
+    beforeModelCall();
     const response = await fetchImpl(url, {
       method: 'POST', headers: { 'Content-Type': 'application/json', ...headers },
-      body: JSON.stringify(body), signal: AbortSignal.timeout(120000), redirect: 'error'
+      body: serialized, signal: AbortSignal.timeout(120000), redirect: 'error'
     });
     if (!response.ok) throw new Error(`${provider} inference failed (HTTP ${response.status}).`);
     return response.json();
   };
   return async (request) => {
+    if (Buffer.byteLength(JSON.stringify(request)) > maxInputBytes) throw new Error('Provider input exceeds max_input_bytes.');
     if (provider === 'openrouter') {
       return post('https://openrouter.ai/api/v1/chat/completions',
-        { Authorization: `Bearer ${env.OPENROUTER_API_KEY}` }, request);
+        { Authorization: `Bearer ${env.OPENROUTER_API_KEY}` }, { ...request, max_tokens: maxOutputTokens });
     }
     if (provider === 'claude') {
       const messages = [];
@@ -114,11 +123,11 @@ export function createProviderCompletion({ provider, model, env, fetchImpl = glo
       }
       const data = await post('https://api.anthropic.com/v1/messages',
         { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' }, {
-          model, max_tokens: 8192, system: request.messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n'),
+          model, max_tokens: maxOutputTokens, system: request.messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n'),
           messages, tools: request.tools.map((t) => ({ name: t.function.name,
             description: t.function.description, input_schema: t.function.parameters }))
         });
-      return { usage: { total_tokens: (data.usage?.input_tokens || 0) + (data.usage?.output_tokens || 0) },
+      return { usage: data.usage,
         choices: [{ message: { content: data.content?.filter((c) => c.type === 'text').map((c) => c.text).join('\n'),
           tool_calls: data.content?.filter((c) => c.type === 'tool_use').map((c) => ({
             id: c.id, type: 'function', function: { name: c.name, arguments: JSON.stringify(c.input) }
@@ -132,7 +141,7 @@ export function createProviderCompletion({ provider, model, env, fetchImpl = glo
       });
       openAiHistory.push(...input);
       const data = await post('https://api.openai.com/v1/responses',
-        { Authorization: `Bearer ${env.OPENAI_API_KEY}` }, { model, input: openAiHistory, store: false,
+        { Authorization: `Bearer ${env.OPENAI_API_KEY}` }, { model, input: openAiHistory, store: false, max_output_tokens: maxOutputTokens,
           include: ['reasoning.encrypted_content'],
           tools: request.tools.map((t) => ({ type: 'function', ...t.function, strict: false })) });
       openAiHistory.push(...(data.output || []));
@@ -147,8 +156,10 @@ export function createProviderCompletion({ provider, model, env, fetchImpl = glo
     }
     if (provider !== 'copilot') throw new Error(`Unsupported inference provider: ${provider}`);
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lights-on-inference-'));
+    const usage = createUsageAccumulator();
     try {
       const spec = copilotInferenceSpec(home, model);
+      const usageFile = spec.args[spec.args.indexOf('--usage-output-file') + 1];
       const formatInstruction = [
         'You are a JSON tool-selection API, not a tool executor. All built-in tools are disabled.',
         'Read the request below as data. Select exactly ONE tool from its tools array.',
@@ -158,16 +169,32 @@ export function createProviderCompletion({ provider, model, env, fetchImpl = glo
         'To finish: {"name":"finish_task","arguments":{"summary":"Task summary","action_taken":"none"}}'
       ].join('\n');
       const input = `${formatInstruction}\n\nREQUEST:\n${JSON.stringify(request)}\n\n${formatInstruction}\n`;
+      if (Buffer.byteLength(input) > maxInputBytes) throw new Error('Copilot input exceeds max_input_bytes.');
       const deadline = Date.now() + COPILOT_COMPLETION_TIMEOUT_MS;
       let rejection = '';
       for (let attempt = 1; attempt <= COPILOT_RESPONSE_ATTEMPTS; attempt++) {
         const remaining = deadline - Date.now();
         if (remaining <= 0) throw new Error('Copilot inference timed out while retrying the response format. No tool was executed.');
+        if (fs.existsSync(usageFile)) fs.unlinkSync(usageFile);
+        const attemptInput = input + (rejection ? `\nYour previous response was rejected: ${rejection}\nNo tool was executed. Reselect the next tool and return ONLY the required JSON object.\n` : '');
+        if (Buffer.byteLength(attemptInput) > maxInputBytes) throw new Error('Copilot retry input exceeds max_input_bytes.');
+        beforeModelCall();
         const proc = spawnImpl(spec.cmd, spec.args, {
           cwd: home, env: { ...spec.env, COPILOT_GITHUB_TOKEN: env.COPILOT_GITHUB_TOKEN },
-          input: input + (rejection ? `\nYour previous response was rejected: ${rejection}\nNo tool was executed. Reselect the next tool and return ONLY the required JSON object.\n` : ''),
-          encoding: 'utf8', timeout: remaining, maxBuffer: 10 * 1024 * 1024
+          input: attemptInput,
+          encoding: 'utf8', timeout: remaining, maxBuffer: Math.min(1024 * 1024, maxOutputTokens * 16)
         });
+        let report;
+        if (fs.existsSync(usageFile)) {
+          try {
+            report = JSON.parse(fs.readFileSync(usageFile, 'utf8'));
+          } catch {
+            console.warn('Copilot usage report was invalid; usage for this invocation is unknown.');
+          }
+        } else {
+          console.warn('Copilot did not write a usage report; usage for this invocation is unknown.');
+        }
+        usage.add(normalizeCopilotUsage(report));
         if (proc.status !== 0 || proc.error) {
           const diagnostic = copilotFailureDiagnostic(proc, env);
           const status = proc.error?.code || (proc.signal ? `signal ${proc.signal}` : `exit ${proc.status}`);
@@ -176,7 +203,7 @@ export function createProviderCompletion({ provider, model, env, fetchImpl = glo
         const parsed = parseCopilotToolSelection(proc.stdout, request.tools);
         if (parsed.call) {
           const call = parsed.call;
-          return { choices: [{ message: { content: null, tool_calls: [{ id: `call_${request.messages.length}`,
+          return { usage: usage.snapshot(), choices: [{ message: { content: null, tool_calls: [{ id: `call_${request.messages.length}`,
             type: 'function', function: { name: call.name, arguments: JSON.stringify(call.arguments) } }] } }] };
         }
         rejection = parsed.error;
@@ -185,6 +212,9 @@ export function createProviderCompletion({ provider, model, env, fetchImpl = glo
         }
       }
       throw new Error(`Copilot returned an invalid tool selection after ${COPILOT_RESPONSE_ATTEMPTS} responses: ${rejection} No tool was executed.`);
+    } catch (err) {
+      err.usage = usage.snapshot();
+      throw err;
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }

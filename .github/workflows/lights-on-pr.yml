@@ -14,7 +14,7 @@ on:
         type: string
 
 concurrency:
-  group: lights-on-pr-${{ github.event.pull_request.number || inputs.pr_number || github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.head_sha || github.run_id }}
+  group: lights-on-maintenance-budget-${{ github.repository }}
   cancel-in-progress: false
 
 permissions:
@@ -73,9 +73,11 @@ jobs:
           node --input-type=module << 'EOF'
           import crypto from 'node:crypto';
           import fs from 'node:fs';
-          import { execFileSync } from 'node:child_process';
+          import { execFileSync } from './.github/lights-on/runner/github-io.mjs';
           import { configuredCiStatus } from './.github/lights-on/runner/verify-ci.mjs';
           import { sanitizeGitHubOutputValue } from './.github/lights-on/runner/load-config.mjs';
+          import { loadConfig } from './.github/lights-on/runner/load-config.mjs';
+          import { allowAgentEvent } from './.github/lights-on/runner/event-policy.mjs';
 
           const sha256File = (filePath) =>
             crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
@@ -109,6 +111,13 @@ jobs:
 
           const prJsonRaw = execFileSync('gh', ['api', `repos/${repo}/pulls/${prNumber}`], { encoding: 'utf8' });
           const prData = JSON.parse(prJsonRaw);
+          const access = allowAgentEvent({ eventName: process.env.EVENT_NAME,
+            event: { pull_request: prData }, config: loadConfig() });
+          if (!access.allowed) {
+            console.log(`Skipping paid PR review: ${access.reason}`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, 'has_pr=false\n');
+            process.exit(0);
+          }
           if (prData.state !== 'open' || prData.merged) {
             console.log('PR is closed or merged; skipping.');
             fs.appendFileSync(process.env.GITHUB_OUTPUT, 'has_pr=false\n');
@@ -175,6 +184,7 @@ jobs:
 
       # Step 5 — Review fresh inputs; comments are never used as cached approvals
       - name: Run 4-Gate Independent Review
+        id: review-agent
         if: >-
           steps.config.outputs.enabled != 'false' &&
           steps.pr-data.outputs.has_pr == 'true' &&
@@ -210,8 +220,9 @@ jobs:
         run: |
           node --input-type=module << 'EOF'
           import fs from 'node:fs';
-          import { execFileSync } from 'node:child_process';
+          import { execFileSync, submitCommitReview } from './.github/lights-on/runner/github-io.mjs';
           import { sanitizeAgentLabelChanges, formatStateComment } from './.github/lights-on/runner/state-store.mjs';
+          import { reportWorkflowEvent, githubItemUrl } from './.github/lights-on/runner/workflow-report.mjs';
           import { assertWriteTargetIsInstalledRepo, neutralizeCrossRepoAutoLinks } from './.github/lights-on/runner/sync-upstream.mjs';
 
           const installedRepo = assertWriteTargetIsInstalledRepo(process.env.GITHUB_REPOSITORY, process.env.GITHUB_REPOSITORY);
@@ -219,7 +230,8 @@ jobs:
 
           const reviewFile = '/tmp/pr-review-result.json';
           if (!fs.existsSync(reviewFile)) {
-            console.log('No /tmp/pr-review-result.json found; skipping review submission.');
+            reportWorkflowEvent({ level: 'warning', title: 'PR review submission skipped',
+              message: 'No agent review result was available; no review was posted.' });
             process.exit(0);
           }
 
@@ -260,16 +272,9 @@ jobs:
           const fullBody = formatStateComment(rawBody, stateMeta);
           fs.writeFileSync('/tmp/pr-review-body.md', fullBody, 'utf8');
 
-          let reviewFlag = '--comment';
-          if (verdict === 'APPROVE' || verdict === 'APPROVED') reviewFlag = '--approve';
-          else if (verdict === 'REQUEST_CHANGES' || verdict === 'CHANGES_REQUESTED') reviewFlag = '--request-changes';
-
-          try {
-            execFileSync('gh', ['pr', 'review', prNumber, '--repo', installedRepo, reviewFlag, '--body-file', '/tmp/pr-review-body.md'], { stdio: 'inherit' });
-          } catch (err) {
-            console.warn('gh pr review fallback to gh issue comment (e.g. self-authored PR):', err.message);
-            execFileSync('gh', ['issue', 'comment', prNumber, '--repo', installedRepo, '--body-file', '/tmp/pr-review-body.md'], { stdio: 'inherit' });
-          }
+          const submitted = submitCommitReview({ prNumber, headSha, verdict, body: fullBody });
+          reportWorkflowEvent({ title: 'PR review posted', message: `Posted commit-bound ${submitted.event} review for PR #${prNumber}; agent verdict: ${verdict}. This is not merge authorization.`,
+            url: githubItemUrl(installedRepo, 'pull', prNumber), details: { 'Head SHA': headSha } });
 
           const removeSet = new Set(labelsToRemove);
           removeSet.add('lights-on:re-review');
@@ -320,9 +325,10 @@ jobs:
             --review-file /tmp/pr-review-result.json \
             --ci-status "$CI_STATUS" \
             --github-output > /tmp/merge-gate-decision.json
+          node .github/lights-on/runner/workflow-report.mjs --merge-decision /tmp/merge-gate-decision.json
           rec_labels=$(node -e 'const fs=require("node:fs"); const d=JSON.parse(fs.readFileSync("/tmp/merge-gate-decision.json","utf8")); console.log((d.recommendedLabels||[]).join(","));')
           if [ -n "$rec_labels" ]; then
-            gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --add-label "$rec_labels" || true
+            node .github/lights-on/runner/github-io.mjs pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --add-label "$rec_labels"
           fi
 
       - name: Auto-merge PR when all gates pass
@@ -338,14 +344,22 @@ jobs:
         run: |
           is_draft=$(node -e 'const fs=require("node:fs"); const pr=JSON.parse(fs.readFileSync("/tmp/pr.json","utf8")); console.log(Boolean(pr.draft));')
           if [ "$is_draft" = "true" ]; then
-            gh pr ready "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" || true
+            node .github/lights-on/runner/github-io.mjs pr ready "$PR_NUMBER" --repo "$GITHUB_REPOSITORY"
           fi
           case "$MERGE_METHOD" in
             merge) method_flag="--merge" ;;
             rebase) method_flag="--rebase" ;;
             *) method_flag="--squash" ;;
           esac
-          gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" "$method_flag" --match-head-commit "$HEAD_SHA"
+          node .github/lights-on/runner/github-io.mjs pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" "$method_flag" --match-head-commit "$HEAD_SHA"
+          state=$(node .github/lights-on/runner/github-io.mjs pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state --jq '.state')
+          if [ "$state" = "MERGED" ]; then
+            node .github/lights-on/runner/workflow-report.mjs --title "PR merged" \
+              --message "PR #$PR_NUMBER is merged." --url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/pull/$PR_NUMBER"
+          else
+            node .github/lights-on/runner/workflow-report.mjs --level warning --title "PR merge not completed" \
+              --message "PR #$PR_NUMBER remains $state after the merge command." --url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/pull/$PR_NUMBER"
+          fi
 
       - name: Handle external PR auto-merge policy block
         if: >-
@@ -356,6 +370,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ steps.pr-data.outputs.pr_number }}
         run: |
-          echo "::notice::External PR #$PR_NUMBER passed all 4 review gates, but external PR auto-merge is disabled by repository configuration (allow_external_pr_automerge: false). A human maintainer can apply the 'lights-on:automerge' label or merge manually."
-          gh label create "lights-on:automerge-disabled-external" --repo "$GITHUB_REPOSITORY" --color "FBCA04" --description "External PR passed gates; awaiting human merge per repo config" --force || true
-          gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --add-label "lights-on:automerge-disabled-external" || true
+          node .github/lights-on/runner/github-io.mjs label create "lights-on:automerge-disabled-external" --repo "$GITHUB_REPOSITORY" --color "FBCA04" --description "External PR merge policy requires maintainer action" --force
+          node .github/lights-on/runner/github-io.mjs pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --add-label "lights-on:automerge-disabled-external"
+
+      - name: Persist shared budget even after failed inference
+        if: always() && steps.review-agent.outcome != '' && steps.review-agent.outcome != 'skipped'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            /tmp/lights-on-cache
+            /tmp/lights-on-threat-model
+          key: lights-on-state-v2-${{ github.repository }}-${{ github.run_id }}-${{ github.run_attempt }}

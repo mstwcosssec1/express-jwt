@@ -15,10 +15,17 @@ on:
           - bootstrap
           - upstream
           - dependencies
+          - toolchains
+          - migration-plan
+          - migration
           - security
           - docs
           - issues
           - release
+      migration_plan:
+        description: "ID of a reviewed dependencies.approved_migrations entry (task: migration only)"
+        required: false
+        type: string
       force:
         description: "Force execution even if rate-limited or up to date"
         required: false
@@ -26,7 +33,7 @@ on:
         type: boolean
 
 concurrency:
-  group: lights-on-schedule-${{ github.ref }}
+  group: lights-on-maintenance-budget-${{ github.repository }}
   cancel-in-progress: false
 
 permissions:
@@ -40,7 +47,9 @@ jobs:
     name: Autonomous Scheduled Maintenance
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    if: vars.LIGHTS_ON_ENABLED != 'false'
+    if: >-
+      vars.LIGHTS_ON_ENABLED != 'false' &&
+      (inputs.task != 'migration' || github.ref_name == github.event.repository.default_branch)
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -69,12 +78,12 @@ jobs:
       - name: Restore Lights On state cache
         id: state-cache
         if: steps.config.outputs.enabled != 'false'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /tmp/lights-on-cache
-          key: lights-on-state-${{ github.repository }}-${{ github.run_id }}
+          key: lights-on-state-v2-${{ github.repository }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            lights-on-state-${{ github.repository }}-
+            lights-on-state-v2-${{ github.repository }}-
 
       - name: Recover state from GitHub issues & PRs if cache missed
         if: steps.config.outputs.enabled != 'false'
@@ -83,7 +92,7 @@ jobs:
           CACHE_HIT: ${{ steps.state-cache.outputs.cache-hit }}
         run: |
           if [ "$CACHE_HIT" != "true" ]; then
-            gh issue list --repo "$GITHUB_REPOSITORY" --state all --limit 50 --json number,author,body,labels,comments > /tmp/lights-on-github-items.json || echo "[]" > /tmp/lights-on-github-items.json
+            node .github/lights-on/runner/github-io.mjs issue list --repo "$GITHUB_REPOSITORY" --state all --limit 50 --json number,author,body,labels,comments > /tmp/lights-on-github-items.json
             node .github/lights-on/runner/state-store.mjs --recover /tmp/lights-on-github-items.json
           else
             node .github/lights-on/runner/state-store.mjs
@@ -159,6 +168,8 @@ jobs:
               --base "$DEFAULT_BRANCH" \
               --head "$branch"
             git checkout "$DEFAULT_BRANCH"
+          else
+            node .github/lights-on/runner/workflow-report.mjs --title "Threat-model publication skipped" --message "No threat-model changes were produced; no PR was published."
           fi
 
       # Step B — Live Dependency & Downstream Dependent Scan
@@ -211,13 +222,27 @@ jobs:
               --base "$DEFAULT_BRANCH" \
               --head "$branch"
             git checkout "$DEFAULT_BRANCH"
+          else
+            node .github/lights-on/runner/workflow-report.mjs --title "Security publication skipped" --message "No security remediation changes were produced; no PR was published."
           fi
 
-      # Step D — Dependency Bumping, Health Check & Migration (dependency-maintainer)
-      - name: Step D — Dependency Bumping, Health Check & Migration
+      # Step D1 selects one bounded work item; security fixes belong to Step C.
+      - name: Step D1 — Select dependency work
+        id: dependency-selection
         if: >-
           steps.config.outputs.enabled != 'false' &&
-          (inputs.task == 'all' || inputs.task == 'dependencies' || inputs.task == '')
+          (inputs.task == 'all' || inputs.task == 'dependencies' || inputs.task == 'migration-plan' || inputs.task == 'migration' || inputs.task == '')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEPENDENCY_REPORT: /tmp/lights-on-deps.json
+          DEPENDENCY_SELECTION: /tmp/lights-on-dependency-selection.json
+          DEPENDENCY_MODE: ${{ inputs.task == 'migration' && 'migration' || inputs.task == 'migration-plan' && 'migration-plan' || 'updates' }}
+          MIGRATION_PLAN_ID: ${{ inputs.migration_plan }}
+        run: node .github/lights-on/runner/dependency-stage.mjs --select
+
+      - name: Step D2 — Generate candidate or read-only migration plan
+        id: dependency-agent
+        if: steps.config.outputs.enabled != 'false' && steps.dependency-selection.outputs.ready == 'true'
         uses: ./.github/actions/lights-on-agent
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -227,75 +252,28 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         with:
           sandbox_image: ${{ vars.LIGHTS_ON_SANDBOX_IMAGE }}
-          task: dependency-maintainer
-          tier: reasoning
-          context_file: /tmp/lights-on-deps.json
+          task: ${{ steps.dependency-selection.outputs.task }}
+          tier: ${{ steps.dependency-selection.outputs.tier }}
+          dependency_selection_file: /tmp/lights-on-dependency-selection.json
           output_file: /tmp/lights-on-deps-result.json
 
-      - name: Open Dependency Bump / Migration PR or Escalation Issue
-        if: >-
-          steps.config.outputs.enabled != 'false' &&
-          (inputs.task == 'all' || inputs.task == 'dependencies' || inputs.task == '')
+      - name: Step D3 — Publish validated candidate or track blocker
+        if: steps.config.outputs.enabled != 'false' && steps.dependency-selection.outputs.ready == 'true' && steps.dependency-agent.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
-        run: |
-          node --input-type=module << 'EOF'
-          import fs from 'node:fs';
-          import { execFileSync } from 'node:child_process';
-          import { sanitizeBranchName } from './.github/lights-on/runner/state-store.mjs';
-          import { publishPr } from './.github/lights-on/runner/publish-pr.mjs';
-          import { assertWriteTargetIsInstalledRepo, neutralizeCrossRepoAutoLinks } from './.github/lights-on/runner/sync-upstream.mjs';
+          DEPENDENCY_SELECTION: /tmp/lights-on-dependency-selection.json
+          DEPENDENCY_RESULT: /tmp/lights-on-deps-result.json
+        run: node .github/lights-on/runner/dependency-stage.mjs --publish
 
-          const installedRepo = assertWriteTargetIsInstalledRepo(process.env.GITHUB_REPOSITORY, process.env.GITHUB_REPOSITORY);
-          const upstreamRepo = process.env.LIGHTS_ON_UPSTREAM_REPO || '';
-
-          const resultFile = '/tmp/lights-on-deps-result.json';
-          const result = fs.existsSync(resultFile)
-            ? JSON.parse(fs.readFileSync(resultFile, 'utf8'))
-            : {};
-
-          const statusOut = execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim();
-          const defaultBranch = process.env.DEFAULT_BRANCH || 'main';
-
-          if (statusOut) {
-            const branch = sanitizeBranchName(
-              result.branch_name,
-              `lights-on/dependency-maintenance-${new Date().toISOString().slice(0, 10)}`
-            );
-            const title = String(result.pr_title || 'chore(deps): automated dependency maintenance and health update').replace(/[\r\n]+/g, ' ').trim();
-            const body = neutralizeCrossRepoAutoLinks(
-              result.pr_body || result.summary || 'Automated dependency update verified against live registry and downstream ecosystem data.',
-              upstreamRepo
-            );
-
-            execFileSync('git', ['config', 'user.name', 'github-actions[bot]'], { stdio: 'inherit' });
-            execFileSync('git', ['config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com'], { stdio: 'inherit' });
-            execFileSync('git', ['checkout', '-B', branch], { stdio: 'inherit' });
-            execFileSync('git', ['add', '-A'], { stdio: 'inherit' });
-            execFileSync('git', ['commit', '-m', title], { stdio: 'inherit' });
-            execFileSync('git', ['push', '-u', 'origin', branch, '--force'], { stdio: 'inherit' });
-
-            fs.writeFileSync('/tmp/lights-on-dep-pr.md', body, 'utf8');
-            publishPr({ repo: installedRepo, head: branch, base: defaultBranch, title,
-              bodyFile: '/tmp/lights-on-dep-pr.md', labels: ['lights-on:dependencies'] });
-            execFileSync('git', ['checkout', defaultBranch], { stdio: 'inherit' });
-          } else if (result.disposition === 'NEEDS_HUMAN' && result.comment_body) {
-            fs.writeFileSync('/tmp/lights-on-dep-issue.md', neutralizeCrossRepoAutoLinks(result.comment_body, upstreamRepo), 'utf8');
-            try {
-              execFileSync('gh', [
-                'issue', 'create',
-                '--repo', installedRepo,
-                '--title', result.pr_title || 'chore(deps): dependency migration requires maintainer approval',
-                '--body-file', '/tmp/lights-on-dep-issue.md',
-                '--label', 'lights-on:needs-human,lights-on:dependencies'
-              ], { stdio: 'inherit' });
-            } catch (err) {
-              console.error('Dependency escalation issue publication failed.');
-              throw err;
-            }
-          }
-          EOF
+      - name: Step D4 — Propose configured CI and build toolchain maintenance
+        if: >-
+          steps.config.outputs.enabled != 'false' &&
+          (inputs.task == 'all' || inputs.task == 'dependencies' || inputs.task == 'toolchains' || inputs.task == '')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+        run: node .github/lights-on/runner/maintain-toolchains.mjs --publish
 
       # Step E — Documentation Clarification & Actionable Issue Fixes (docs-clarifier / issue-responder)
       - name: Step E (1) — Documentation Clarification (docs-clarifier)
@@ -340,6 +318,8 @@ jobs:
               --base "$DEFAULT_BRANCH" \
               --head "$branch"
             git checkout "$DEFAULT_BRANCH"
+          else
+            node .github/lights-on/runner/workflow-report.mjs --title "Documentation publication skipped" --message "No documentation changes were produced; no PR was published."
           fi
 
       - name: Fetch open actionable issues
@@ -350,7 +330,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh issue list --repo "$GITHUB_REPOSITORY" --state open --label "lights-on:actionable" --limit 5 --json number,title,body,labels > /tmp/lights-on-actionable-issues.json || echo "[]" > /tmp/lights-on-actionable-issues.json
+          node .github/lights-on/runner/github-io.mjs issue list --repo "$GITHUB_REPOSITORY" --state open --label "lights-on:actionable" --limit 5 --json number,title,body,labels > /tmp/lights-on-actionable-issues.json
           count=$(node -e 'const fs=require("node:fs"); const a=JSON.parse(fs.readFileSync("/tmp/lights-on-actionable-issues.json","utf8")); console.log(Array.isArray(a)?a.length:0);')
           echo "count=$count" >> "$GITHUB_OUTPUT"
 
@@ -386,9 +366,11 @@ jobs:
         run: |
           node --input-type=module << 'EOF'
           import fs from 'node:fs';
-          import { execFileSync } from 'node:child_process';
+          import { execFileSync } from './.github/lights-on/runner/github-io.mjs';
+          import { plainPublicationText } from './.github/lights-on/runner/publication-text.mjs';
           import { sanitizeBranchName } from './.github/lights-on/runner/state-store.mjs';
           import { publishPr } from './.github/lights-on/runner/publish-pr.mjs';
+          import { reportWorkflowEvent } from './.github/lights-on/runner/workflow-report.mjs';
           import { assertWriteTargetIsInstalledRepo, neutralizeCrossRepoAutoLinks } from './.github/lights-on/runner/sync-upstream.mjs';
 
           const installedRepo = assertWriteTargetIsInstalledRepo(process.env.GITHUB_REPOSITORY, process.env.GITHUB_REPOSITORY);
@@ -405,10 +387,7 @@ jobs:
               result.branch_name,
               `lights-on/actionable-issue-fix-${new Date().toISOString().slice(0, 10)}`
             );
-            const title = neutralizeCrossRepoAutoLinks(
-              String(result.pr_title || 'fix: resolve open actionable issue').replace(/[\r\n]+/g, ' ').trim(),
-              upstreamRepo
-            );
+            const title = plainPublicationText(result.pr_title || 'fix: resolve open actionable issue');
             const body = neutralizeCrossRepoAutoLinks(
               result.pr_body || result.summary || 'Automated fix for open actionable issue.',
               upstreamRepo
@@ -424,6 +403,8 @@ jobs:
             fs.writeFileSync('/tmp/lights-on-issue-fix-pr.md', body, 'utf8');
             publishPr({ repo: installedRepo, head: branch, base: defaultBranch, title,
               bodyFile: '/tmp/lights-on-issue-fix-pr.md', labels: ['lights-on:agent-pr'] });
+          } else {
+            reportWorkflowEvent({ title: 'Issue-fix publication skipped', message: 'No actionable-issue changes were produced; no PR was published.' });
           }
 
           try {
@@ -445,22 +426,23 @@ jobs:
         run: |
           node --input-type=module << 'EOF'
           import fs from 'node:fs';
-          import { execFileSync } from 'node:child_process';
+          import { execFileSync } from './.github/lights-on/runner/github-io.mjs';
           import { prepareRelease } from './.github/lights-on/runner/prepare-release.mjs';
           import { sanitizeBranchName } from './.github/lights-on/runner/state-store.mjs';
           import { publishPr } from './.github/lights-on/runner/publish-pr.mjs';
+          import { reportWorkflowEvent } from './.github/lights-on/runner/workflow-report.mjs';
 
           const defaultBranch = process.env.DEFAULT_BRANCH || 'main';
           const res = prepareRelease({ repoRoot: process.cwd() });
 
           if (!res.shouldRelease) {
-            console.log(`No release needed (${res.reason || 'up-to-date'}).`);
+            reportWorkflowEvent({ title: 'Release preparation skipped', message: `No release needed (${res.reason || 'up-to-date'}); no PR was published.` });
             process.exit(0);
           }
 
           const statusOut = execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim();
           if (!statusOut) {
-            console.log('No manifest/changelog changes produced for release; skipping PR.');
+            reportWorkflowEvent({ title: 'Release publication skipped', message: 'No manifest/changelog changes were produced; no PR was published.' });
             process.exit(0);
           }
 
@@ -486,3 +468,12 @@ jobs:
         if: always() && steps.config.outputs.enabled != 'false'
         run: |
           node .github/lights-on/runner/state-store.mjs --save || true
+
+      - name: Persist shared budget even after failed inference
+        if: always() && steps.config.outputs.enabled == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            /tmp/lights-on-cache
+            /tmp/lights-on-threat-model
+          key: lights-on-state-v2-${{ github.repository }}-${{ github.run_id }}-${{ github.run_attempt }}

@@ -173,6 +173,11 @@ export function evaluatePrSafety({
     allowAutoMerge = false;
     reasons.push('mode-not-lights-on');
   }
+  if (!['squash', 'merge'].includes(autonomy.merge_method)) {
+    allowAutoMerge = false;
+    requiresHuman = true;
+    reasons.push('merge-method-not-safe-for-reference-isolation');
+  }
 
   // 2. Check ignore / wontfix labels
   if (labelSet.has(LABELS.IGNORE.toLowerCase()) || labelSet.has('wontfix')) {

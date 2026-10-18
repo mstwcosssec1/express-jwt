@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { normalizeUsage } from './usage.mjs';
 
 export const LABELS = {
   IGNORE: 'lights-on:ignore',
@@ -203,7 +204,11 @@ export function loadState(options = {}) {
 
   try {
     const raw = fs.readFileSync(stateFile, 'utf8');
-    const parsed = stripDangerousKeys(JSON.parse(raw)) || {};
+    const parsed = stripDangerousKeys(JSON.parse(raw));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) ||
+        (parsed.usage_history !== undefined && !Array.isArray(parsed.usage_history))) {
+      throw new Error('Invalid state schema');
+    }
     return {
       ...initial,
       ...parsed,
@@ -214,7 +219,7 @@ export function loadState(options = {}) {
       usage_history: Array.isArray(parsed.usage_history) ? parsed.usage_history : []
     };
   } catch {
-    return initial;
+    throw new Error('Lights On state is unreadable or invalid; refusing to reset usage accounting. Inspect the state file before retrying.');
   }
 }
 
@@ -276,7 +281,7 @@ export function getAttempts(state, itemKey) {
   return state?.processed_items?.[itemKey]?.attempts || 0;
 }
 
-export function recordUsage(state, { task = 'general', tokensUsed = 0, costUsd = 0, now = Date.now() } = {}) {
+export function recordUsage(state, { task = 'general', tokensUsed = null, costUsd = null, usage, outcome = 'completed', now = Date.now() } = {}) {
   if (!Array.isArray(state.usage_history)) {
     state.usage_history = [];
   }
@@ -286,11 +291,22 @@ export function recordUsage(state, { task = 'general', tokensUsed = 0, costUsd =
     return Number.isFinite(ts) && ts >= cutoff48h;
   });
 
+  const normalized = normalizeUsage(usage || { total_tokens: tokensUsed, cost_usd: costUsd });
   const record = {
     at: new Date(now).toISOString(),
     task: String(task || 'general'),
-    tokens_used: Math.max(0, Number(tokensUsed) || 0),
-    cost_usd: Math.max(0, Number(costUsd) || 0)
+    outcome,
+    tokens_used: normalized.total_tokens,
+    cost_usd: normalized.cost_usd,
+    known_tokens_used: normalized.known_total_tokens,
+    known_cost_usd: normalized.known_cost_usd,
+    tokens_status: normalized.tokens_status,
+    cost_source: normalized.cost_source,
+    premium_requests: normalized.premium_requests,
+    copilot_nano_aiu: normalized.copilot_nano_aiu,
+    copilot_ai_credits_status: normalized.copilot_ai_credits_status,
+    copilot_cli_invocations: normalized.copilot_cli_invocations,
+    copilot_usage_reports: normalized.copilot_usage_reports
   };
   state.usage_history.push(record);
   return record;
@@ -313,18 +329,26 @@ export function checkBudgetAndRateLimits(state, config = {}, { task = 'general',
     return Number.isFinite(ts) && ts >= oneHourAgo && e?.task === 'issue-responder';
   });
 
-  const dailySpendUsd = runsLast24h.reduce((sum, e) => sum + (Number(e?.cost_usd) || 0), 0);
+  const validCost = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+  const costTrackingComplete = runsLast24h.every((entry) => validCost(entry.cost_usd));
+  const knownDailySpendUsd = runsLast24h.reduce((sum, e) =>
+    sum + (validCost(e.known_cost_usd) ? e.known_cost_usd : validCost(e.cost_usd) ? e.cost_usd : 0), 0);
+  const reservedDailyBudgetUsd = runsLast24h.reduce((sum, e) => sum + Math.max(0,
+    (validCost(e.reserved_cost_usd) ? e.reserved_cost_usd : 0) -
+    (validCost(e.known_cost_usd) ? e.known_cost_usd : validCost(e.cost_usd) ? e.cost_usd : 0)), 0);
+  const budgetAccountedUsd = knownDailySpendUsd + reservedDailyBudgetUsd;
+  const dailySpendUsd = costTrackingComplete ? knownDailySpendUsd : null;
 
   if (
     typeof limits.max_daily_budget_usd === 'number' &&
     limits.max_daily_budget_usd >= 0 &&
-    dailySpendUsd >= limits.max_daily_budget_usd &&
+    budgetAccountedUsd >= limits.max_daily_budget_usd &&
     limits.max_daily_budget_usd > 0
   ) {
     return {
       allowed: false,
       reason: 'daily-budget-exceeded',
-      details: { dailySpendUsd, maxDailyBudgetUsd: limits.max_daily_budget_usd }
+      details: { dailySpendUsd, knownDailySpendUsd, reservedDailyBudgetUsd, budgetAccountedUsd, costTrackingComplete, maxDailyBudgetUsd: limits.max_daily_budget_usd }
     };
   }
   if (limits.max_daily_budget_usd === 0) {
@@ -378,7 +402,11 @@ export function checkBudgetAndRateLimits(state, config = {}, { task = 'general',
     details: {
       runsLast24h: runsLast24h.length,
       issueResponsesLastHour: issueResponsesLastHour.length,
-      dailySpendUsd
+      dailySpendUsd,
+      knownDailySpendUsd,
+      reservedDailyBudgetUsd,
+      budgetAccountedUsd,
+      costTrackingComplete
     }
   };
 }

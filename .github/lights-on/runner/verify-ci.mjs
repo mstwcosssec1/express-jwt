@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from './github-io.mjs';
 import { loadConfig } from './load-config.mjs';
 
 const SELF_CHECK = '4-Gate Review & Auto-Merge Verification';
