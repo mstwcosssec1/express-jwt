@@ -2,13 +2,17 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { stripVTControlCharacters } from 'node:util';
 
 // Only inference occurs here. Repository tools are dispatched by the controller.
 export function copilotInferenceSpec(home, model) {
   return {
     cmd: 'copilot',
-    args: ['--available-tools', '--disable-builtin-mcps', '--no-custom-instructions',
-      '--no-ask-user', '--no-auto-update', '--deny-tool', '*', '--silent',
+    // In 1.0.98 an empty allowlist means "no filter". This deliberately unmatched
+    // name keeps the allowlist nonempty while exposing no built-in tools.
+    args: ['--available-tools=lights_on_no_builtin_tools', '--disable-builtin-mcps', '--no-custom-instructions',
+      '--no-ask-user', '--no-auto-update', '--deny-tool', 'shell',
+      '--deny-tool', 'write', '--deny-tool', 'url', '--silent',
       '--model', model, '--log-level', 'none'],
     env: {
       PATH: process.env.PATH, SystemRoot: process.env.SystemRoot,
@@ -16,6 +20,19 @@ export function copilotInferenceSpec(home, model) {
       XDG_CONFIG_HOME: home, XDG_CACHE_HOME: home
     }
   };
+}
+
+function copilotFailureDiagnostic(proc, env) {
+  let text = stripVTControlCharacters([proc.error?.message, proc.stderr || proc.stdout].filter(Boolean).join(' '));
+  const secrets = Object.entries(env)
+    .filter(([key, value]) => /token|secret|password|api_?key|credential|authorization/i.test(key) &&
+      typeof value === 'string' && value.length > 0)
+    .flatMap(([, value]) => [value, encodeURIComponent(value), JSON.stringify(value).slice(1, -1)])
+    .sort((a, b) => b.length - a.length);
+  for (const secret of secrets) text = text.split(secret).join('[REDACTED]');
+  text = text.replace(/\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+)\b/g, '[REDACTED]')
+    .replace(/[\x00-\x1f\x7f-\x9f]+/g, ' ').trim();
+  return text.length > 2000 ? `${text.slice(0, 2000)} [truncated]` : text;
 }
 
 export function createProviderCompletion({ provider, model, env, fetchImpl = globalThis.fetch, spawnImpl = spawnSync }) {
@@ -91,7 +108,11 @@ export function createProviderCompletion({ provider, model, env, fetchImpl = glo
         input: `You are a tool-selection API. Do not use built-in tools. Return ONLY JSON of shape {"name":"tool_name","arguments":{...}} selecting ONE supplied tool.\n${JSON.stringify(request)}\n`,
         encoding: 'utf8', timeout: 120000, maxBuffer: 10 * 1024 * 1024
       });
-      if (proc.status !== 0 || proc.error) throw new Error(`Copilot inference failed: ${proc.error?.message || `exit ${proc.status}`}`);
+      if (proc.status !== 0 || proc.error) {
+        const diagnostic = copilotFailureDiagnostic(proc, env);
+        const status = proc.error?.code || (proc.signal ? `signal ${proc.signal}` : `exit ${proc.status}`);
+        throw new Error(`Copilot inference failed (${status})${diagnostic ? `: ${diagnostic}` : '.'}`);
+      }
       const call = JSON.parse(proc.stdout.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''));
       if (!request.tools.some((t) => t.function.name === call.name) || !call.arguments || typeof call.arguments !== 'object') {
         throw new Error('Copilot returned an invalid tool selection.');
