@@ -24,8 +24,9 @@ Options has the following parameters:
 
 The available functions have the following interface:
 
-- `GetVerificationKey = (req: express.Request, token: jwt.Jwt | undefined) => Promise<jwt.Secret>;`
-- `IsRevoked = (req: express.Request, token: jwt.Jwt | undefined) => Promise<boolean>;`
+- `GetVerificationKey = (req: express.Request, token: jwt.Jwt | undefined) => jwt.Secret | undefined | Promise<jwt.Secret | undefined>;`
+- `IsRevoked = (req: express.Request, token: jwt.Jwt | undefined) => boolean | Promise<boolean>;`
+- `ExpirationHandler = (req: express.Request, err: UnauthorizedError) => void | Promise<void>;`
 - `TokenGetter = (req: express.Request) => string | Promise<string> | undefined;`
 
 ## Usage
@@ -155,7 +156,7 @@ If you need to obtain the key dynamically from other sources, you can pass a fun
 For example, if the secret varies based on the [issuer](http://self-issued.info/docs/draft-ietf-oauth-json-web-token.html#issDef):
 
 ```javascript
-var jwt = require("express-jwt");
+var { expressjwt: jwt } = require("express-jwt");
 var data = require("./data");
 var utilities = require("./utilities");
 
@@ -193,7 +194,7 @@ var getSecret = async function (req, token) {
 
 ### Revoked tokens
 
-It is possible that some tokens will need to be revoked so they cannot be used any longer. You can provide a function as the `isRevoked` option. The signature of the function is `function(req, payload, done)`:
+It is possible that some tokens will need to be revoked so they cannot be used any longer. You can provide a function as the `isRevoked` option. The signature of the function is `function(req, token)`, and it may return a boolean or a promise of a boolean:
 
 - `req` (`Object`) - The express `request` object.
 - `token` (`Object`) - An object with the JWT payload and headers.
@@ -201,14 +202,14 @@ It is possible that some tokens will need to be revoked so they cannot be used a
 For example, if the `(iss, jti)` claim pair is used to identify a JWT:
 
 ```javascript
-const jwt = require("express-jwt");
+const { expressjwt: jwt } = require("express-jwt");
 const data = require("./data");
 
 const isRevokedCallback = async (req, token) => {
   const issuer = token.payload.iss;
   const tokenId = token.payload.jti;
-  const token = await data.getRevokedToken(issuer, tokenId);
-  return token !== "undefined";
+  const revokedToken = await data.getRevokedToken(issuer, tokenId);
+  return revokedToken !== undefined;
 };
 
 app.get(
@@ -236,7 +237,7 @@ You can handle expired tokens as follows:
     onExpired: async (req, err) => {
       if (new Date() - err.inner.expiredAt < 5000) { return;}
       throw err;
-    },,
+    },
   })
 ```
 
