@@ -60,6 +60,12 @@ jobs:
           LIGHTS_ON_UPSTREAM_REPO: ${{ vars.LIGHTS_ON_UPSTREAM_REPO }}
         run: node .github/lights-on/runner/load-config.mjs --github-output
 
+      - name: Ensure standard lights-on labels exist
+        if: steps.config.outputs.enabled != 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node .github/lights-on/runner/ensure-labels.mjs
+
       - name: Restore Lights On state cache
         id: state-cache
         if: steps.config.outputs.enabled != 'false'
@@ -147,12 +153,11 @@ jobs:
             git add THREAT_MODEL.md threat-model.yaml threat-model.json 2>/dev/null || git add THREAT_MODEL.md
             git commit -m "docs(security): bootstrap and sync THREAT_MODEL.md"
             git push -u origin "$branch" --force
-            gh pr create \
-              --repo "$GITHUB_REPOSITORY" \
+            node .github/lights-on/runner/publish-pr.mjs \
               --title "docs(security): bootstrap and sync THREAT_MODEL.md" \
               --body "Automated threat model generation grounded in \`alpha-omega-security/threat-model\` (§1.1–§1.19)." \
               --base "$DEFAULT_BRANCH" \
-              --head "$branch" || true
+              --head "$branch"
             git checkout "$DEFAULT_BRANCH"
           fi
 
@@ -199,13 +204,12 @@ jobs:
             git add -A
             git commit -m "fix(security): automated vulnerability remediation"
             git push -u origin "$branch" --force
-            gh pr create \
-              --repo "$GITHUB_REPOSITORY" \
+            node .github/lights-on/runner/publish-pr.mjs \
               --title "fix(security): automated vulnerability remediation" \
               --body "Automated security vulnerability remediation verified against OSV.dev and \`THREAT_MODEL.md\`." \
               --label "lights-on:security" \
               --base "$DEFAULT_BRANCH" \
-              --head "$branch" || true
+              --head "$branch"
             git checkout "$DEFAULT_BRANCH"
           fi
 
@@ -240,6 +244,7 @@ jobs:
           import fs from 'node:fs';
           import { execFileSync } from 'node:child_process';
           import { sanitizeBranchName } from './.github/lights-on/runner/state-store.mjs';
+          import { publishPr } from './.github/lights-on/runner/publish-pr.mjs';
           import { assertWriteTargetIsInstalledRepo, neutralizeCrossRepoAutoLinks } from './.github/lights-on/runner/sync-upstream.mjs';
 
           const installedRepo = assertWriteTargetIsInstalledRepo(process.env.GITHUB_REPOSITORY, process.env.GITHUB_REPOSITORY);
@@ -272,19 +277,8 @@ jobs:
             execFileSync('git', ['push', '-u', 'origin', branch, '--force'], { stdio: 'inherit' });
 
             fs.writeFileSync('/tmp/lights-on-dep-pr.md', body, 'utf8');
-            try {
-              execFileSync('gh', [
-                'pr', 'create',
-                '--repo', installedRepo,
-                '--title', title,
-                '--body-file', '/tmp/lights-on-dep-pr.md',
-                '--label', 'lights-on:dependencies',
-                '--base', defaultBranch,
-                '--head', branch
-              ], { stdio: 'inherit' });
-            } catch (err) {
-              console.warn('PR creation note:', err.message);
-            }
+            publishPr({ repo: installedRepo, head: branch, base: defaultBranch, title,
+              bodyFile: '/tmp/lights-on-dep-pr.md', labels: ['lights-on:dependencies'] });
             execFileSync('git', ['checkout', defaultBranch], { stdio: 'inherit' });
           } else if (result.disposition === 'NEEDS_HUMAN' && result.comment_body) {
             fs.writeFileSync('/tmp/lights-on-dep-issue.md', neutralizeCrossRepoAutoLinks(result.comment_body, upstreamRepo), 'utf8');
@@ -297,7 +291,8 @@ jobs:
                 '--label', 'lights-on:needs-human,lights-on:dependencies'
               ], { stdio: 'inherit' });
             } catch (err) {
-              console.warn('Issue creation note:', err.message);
+              console.error('Dependency escalation issue publication failed.');
+              throw err;
             }
           }
           EOF
@@ -338,13 +333,12 @@ jobs:
             git add -A
             git commit -m "docs: clarify recurring questions from issue tracker"
             git push -u origin "$branch" --force
-            gh pr create \
-              --repo "$GITHUB_REPOSITORY" \
+            node .github/lights-on/runner/publish-pr.mjs \
               --title "docs: clarify recurring questions from issue tracker" \
               --body "Automated documentation improvements grounded in recent user questions." \
               --label "lights-on:docs" \
               --base "$DEFAULT_BRANCH" \
-              --head "$branch" || true
+              --head "$branch"
             git checkout "$DEFAULT_BRANCH"
           fi
 
@@ -383,7 +377,6 @@ jobs:
 
       - name: Open Actionable Issue Fix PR if changes were produced and clean working tree
         if: >-
-          always() &&
           steps.config.outputs.enabled != 'false' &&
           (inputs.task == 'all' || inputs.task == 'docs' || inputs.task == 'issues' || inputs.task == 'upstream' || inputs.task == '')
         env:
@@ -395,6 +388,7 @@ jobs:
           import fs from 'node:fs';
           import { execFileSync } from 'node:child_process';
           import { sanitizeBranchName } from './.github/lights-on/runner/state-store.mjs';
+          import { publishPr } from './.github/lights-on/runner/publish-pr.mjs';
           import { assertWriteTargetIsInstalledRepo, neutralizeCrossRepoAutoLinks } from './.github/lights-on/runner/sync-upstream.mjs';
 
           const installedRepo = assertWriteTargetIsInstalledRepo(process.env.GITHUB_REPOSITORY, process.env.GITHUB_REPOSITORY);
@@ -428,19 +422,8 @@ jobs:
             execFileSync('git', ['push', '-u', 'origin', branch, '--force'], { stdio: 'inherit' });
 
             fs.writeFileSync('/tmp/lights-on-issue-fix-pr.md', body, 'utf8');
-            try {
-              execFileSync('gh', [
-                'pr', 'create',
-                '--repo', installedRepo,
-                '--title', title,
-                '--body-file', '/tmp/lights-on-issue-fix-pr.md',
-                '--label', 'lights-on:agent-pr',
-                '--base', defaultBranch,
-                '--head', branch
-              ], { stdio: 'inherit' });
-            } catch (err) {
-              console.warn('Actionable issue PR note:', err.message);
-            }
+            publishPr({ repo: installedRepo, head: branch, base: defaultBranch, title,
+              bodyFile: '/tmp/lights-on-issue-fix-pr.md', labels: ['lights-on:agent-pr'] });
           }
 
           try {
@@ -465,6 +448,7 @@ jobs:
           import { execFileSync } from 'node:child_process';
           import { prepareRelease } from './.github/lights-on/runner/prepare-release.mjs';
           import { sanitizeBranchName } from './.github/lights-on/runner/state-store.mjs';
+          import { publishPr } from './.github/lights-on/runner/publish-pr.mjs';
 
           const defaultBranch = process.env.DEFAULT_BRANCH || 'main';
           const res = prepareRelease({ repoRoot: process.cwd() });
@@ -492,25 +476,9 @@ jobs:
           execFileSync('git', ['commit', '-m', res.prTitle], { stdio: 'inherit' });
           execFileSync('git', ['push', '-u', 'origin', branch, '--force'], { stdio: 'inherit' });
 
-          try {
-            execFileSync('gh', ['label', 'create', 'lights-on:release', '--repo', process.env.GITHUB_REPOSITORY, '--color', '0E8A16', '--description', 'Automated Release PR', '--force'], { stdio: 'ignore' });
-            execFileSync('gh', ['label', 'create', 'lights-on:agent-pr', '--repo', process.env.GITHUB_REPOSITORY, '--color', '1D76DB', '--description', 'Automated PR created by Lights On', '--force'], { stdio: 'ignore' });
-          } catch {}
-
           fs.writeFileSync('/tmp/lights-on-release-pr.md', res.prBody, 'utf8');
-          try {
-            execFileSync('gh', [
-              'pr', 'create',
-              '--repo', process.env.GITHUB_REPOSITORY,
-              '--title', res.prTitle,
-              '--body-file', '/tmp/lights-on-release-pr.md',
-              '--label', 'lights-on:release,lights-on:agent-pr',
-              '--base', defaultBranch,
-              '--head', branch
-            ], { stdio: 'inherit' });
-          } catch (err) {
-            console.warn('Release PR note:', err.message);
-          }
+          publishPr({ head: branch, base: defaultBranch, title: res.prTitle,
+            bodyFile: '/tmp/lights-on-release-pr.md', labels: ['lights-on:release', 'lights-on:agent-pr'] });
           execFileSync('git', ['checkout', defaultBranch], { stdio: 'inherit' });
           EOF
 

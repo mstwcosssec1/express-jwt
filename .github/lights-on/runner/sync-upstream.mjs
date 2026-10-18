@@ -836,24 +836,9 @@ export async function syncUpstream({
       resolution.installedRepo,
       resolution.upstreamRepo
     );
-    try {
-      execFileImpl(
-        'gh',
-        [
-          'label',
-          'create',
-          'lights-on:upstream',
-          '--repo',
-          safeInstalled,
-          '--color',
-          '5319E7',
-          '--description',
-          'Mirrored from read-only upstream repository',
-          '--force'
-        ],
-        { encoding: 'utf8', env: { ...process.env, ...env } }
-      );
-    } catch {}
+    const { ensureLabels } = await import('./ensure-labels.mjs');
+    ensureLabels({ repo: safeInstalled, installedRepo: resolution.installedRepo,
+      labels: mirroredIssues.flatMap((item) => item.labels), execFileImpl, env: { ...process.env, ...env } });
 
     for (const item of mirroredIssues) {
       const tmpBodyFile = path.join(

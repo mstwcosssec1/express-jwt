@@ -55,34 +55,7 @@ jobs:
         if: steps.config.outputs.enabled != 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          labels=(
-            "lights-on:triaged:#0E8A16:Triaged by Lights On autonomous maintainer"
-            "lights-on:needs-info:#FBCA04:Awaiting reproduction details or clarification from reporter"
-            "lights-on:actionable:#1D76DB:Verified actionable bug or enhancement ready for automated fix"
-            "lights-on:needs-human:#D93F0B:Escalated to human maintainer (security/breaking decision)"
-            "lights-on:wontfix-by-design:#5319E7:Behavior is intentional per THREAT_MODEL.md or project scope"
-            "lights-on:ignore:#E4E669:Opt out of Lights On automation for this issue or PR"
-            "lights-on:approved:#0E8A16:Human maintainer override approving PR for merge"
-            "lights-on:re-review:#1D76DB:Trigger a fresh 4-Gate Lights On review"
-            "lights-on:pause:#B60205:Pause Lights On automated merges"
-            "lights-on:reviewed:#C2E0C6:PR has been reviewed by Lights On"
-            "lights-on:changes-requested:#E4E669:Changes requested by Lights On 4-Gate review"
-            "lights-on:automerge:#0E8A16:Maintainer opt-in for external PR auto-merge"
-            "lights-on:approved-override:#5319E7:Maintainer override for breaking API or protected-path changes"
-            "lights-on:migrate-dep:#0052CC:Approved for automated dependency replacement migration"
-            "lights-on:automerge-disabled-external:#FBCA04:External PR passed gates; awaiting human merge per repo config"
-            "lights-on:security:#B60205:Security vulnerability remediation"
-            "lights-on:dependencies:#0366D6:Automated dependency update or health check"
-            "lights-on:docs:#0075CA:Automated documentation clarification"
-            "lights-on:release:#0E8A16:Automated Release PR"
-            "lights-on:upstream:#5319E7:Mirrored from read-only upstream repository"
-          )
-          for entry in "${labels[@]}"; do
-            IFS=':' read -r prefix suffix color desc <<< "$entry"
-            name="${prefix}:${suffix}"
-            gh label create "$name" --repo "$GITHUB_REPOSITORY" --color "${color#\#}" --description "$desc" --force || true
-          done
+        run: node .github/lights-on/runner/ensure-labels.mjs
 
       - name: Serialize GitHub event and enforce slash-command & author authorization
         id: authorize
@@ -221,6 +194,7 @@ jobs:
           import fs from 'node:fs';
           import { execFileSync } from 'node:child_process';
           import * as stateStore from './.github/lights-on/runner/state-store.mjs';
+          import { publishPr } from './.github/lights-on/runner/publish-pr.mjs';
           import { assertWriteTargetIsInstalledRepo, neutralizeCrossRepoAutoLinks } from './.github/lights-on/runner/sync-upstream.mjs';
 
           const installedRepo = assertWriteTargetIsInstalledRepo(
@@ -308,14 +282,7 @@ jobs:
             execFileSync('git', ['push', '-u', 'origin', branchName, '--force'], { stdio: 'inherit' });
 
             fs.writeFileSync('/tmp/lights-on-pr-body.md', prBody, 'utf8');
-            execFileSync('gh', [
-              'pr', 'create',
-              '--repo', installedRepo,
-              '--title', prTitle,
-              '--body-file', '/tmp/lights-on-pr-body.md',
-              '--label', 'lights-on:agent-pr',
-              '--base', process.env.DEFAULT_BRANCH || 'main',
-              '--head', branchName
-            ], { stdio: 'inherit' });
+            publishPr({ repo: installedRepo, head: branchName, base: process.env.DEFAULT_BRANCH || 'main',
+              title: prTitle, bodyFile: '/tmp/lights-on-pr-body.md', labels: ['lights-on:agent-pr'] });
           }
           EOF

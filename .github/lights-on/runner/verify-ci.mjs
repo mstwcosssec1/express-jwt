@@ -53,5 +53,9 @@ export function fetchCiStatus({ repo, sha, requiredChecks = [], execFileImpl = e
 }
 
 export function configuredCiStatus(repo, sha) {
-  return fetchCiStatus({ repo, sha, requiredChecks: loadConfig().autonomy.required_checks });
+  const requiredChecks = loadConfig().autonomy.required_checks;
+  if (!Array.isArray(requiredChecks) || !requiredChecks.length) {
+    console.warn('Lights On auto-merge is blocked: configure autonomy.required_checks with trusted CI contexts and App IDs.');
+  }
+  return fetchCiStatus({ repo, sha, requiredChecks });
 }
