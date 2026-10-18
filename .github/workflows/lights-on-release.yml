@@ -1,0 +1,208 @@
+name: Lights On - Release & Package Publisher
+
+on:
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Explicit SemVer version to tag and publish"
+        required: false
+        type: string
+      dry_run:
+        description: "Show the release plan without building, tagging, or publishing"
+        default: false
+        type: boolean
+
+concurrency:
+  group: lights-on-release-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    if: >-
+      vars.LIGHTS_ON_ENABLED != 'false' &&
+      (
+        (github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch) ||
+        (github.event.pull_request.merged == true &&
+         github.event.pull_request.base.ref == github.event.repository.default_branch &&
+         contains(github.event.pull_request.labels.*.name, 'lights-on:release'))
+      )
+    outputs:
+      sha: ${{ steps.plan.outputs.sha }}
+      version: ${{ steps.plan.outputs.version }}
+      enabled: ${{ steps.plan.outputs.enabled }}
+      publish: ${{ steps.plan.outputs.publish }}
+      create_release: ${{ steps.plan.outputs.create_release }}
+      ecosystems: ${{ steps.plan.outputs.ecosystems }}
+      has_packages: ${{ steps.plan.outputs.has_packages }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: Validate trusted release plan
+        id: plan
+        env:
+          LIGHTS_ON_ENABLED: ${{ vars.LIGHTS_ON_ENABLED }}
+          LIGHTS_ON_RELEASE_ENABLED: ${{ vars.LIGHTS_ON_RELEASE_ENABLED }}
+          LIGHTS_ON_AUTO_PUBLISH: ${{ vars.LIGHTS_ON_AUTO_PUBLISH }}
+          INPUT_VERSION: ${{ inputs.version }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_AUTHOR_LOGIN: ${{ github.event.pull_request.user.login }}
+          PR_AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          node --input-type=module <<'EOF'
+          import fs from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          import { loadConfig } from './.github/lights-on/runner/load-config.mjs';
+          import { parseReleaseMetadataFromPr, publishRelease } from './.github/lights-on/runner/publish-release.mjs';
+          import { isTrustedStateAuthor } from './.github/lights-on/runner/state-store.mjs';
+          if (process.env.EVENT_NAME === 'pull_request' &&
+              !isTrustedStateAuthor(process.env.PR_AUTHOR_LOGIN, process.env.PR_AUTHOR_ASSOCIATION)) {
+            throw new Error('Release author is not trusted.');
+          }
+          const config = loadConfig();
+          const version = process.env.INPUT_VERSION || parseReleaseMetadataFromPr({
+            title: process.env.PR_TITLE, body: process.env.PR_BODY
+          })?.version;
+          const plan = publishRelease({ version, config, dryRun: true, env: {} });
+          const ecosystems = [...new Set(plan.targets.map(t => t.ecosystem).filter(e => e !== 'go'))];
+          const outputs = {
+            sha: execFileSync('git', ['rev-parse', 'HEAD'], {encoding: 'utf8'}).trim(),
+            version: plan.version,
+            enabled: config.enabled && config.release.enabled,
+            publish: config.release.auto_publish,
+            create_release: config.release.create_github_release,
+            ecosystems: JSON.stringify(ecosystems),
+            has_packages: ecosystems.length > 0
+          };
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, Object.entries(outputs).map(([k,v]) => `${k}=${v}`).join('\n') + '\n');
+          console.log(JSON.stringify(plan, null, 2));
+          EOF
+
+  build:
+    needs: metadata
+    if: needs.metadata.outputs.enabled == 'true' && needs.metadata.outputs.publish == 'true' && needs.metadata.outputs.has_packages == 'true' && inputs.dry_run != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        ecosystem: ${{ fromJSON(needs.metadata.outputs.ecosystems) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.metadata.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: Install Python build tool
+        if: matrix.ecosystem == 'pypi'
+        run: python -m pip install build
+      - name: Build packages without registry credentials or OIDC permission
+        env:
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+          ECOSYSTEM: ${{ matrix.ecosystem }}
+          ARTIFACT_DIR: ${{ runner.temp }}/release-artifacts
+        run: node .github/lights-on/runner/release-artifacts.mjs --build
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-${{ matrix.ecosystem }}-${{ needs.metadata.outputs.sha }}
+          path: ${{ runner.temp }}/release-artifacts/
+          if-no-files-found: error
+          retention-days: 7
+
+  tag:
+    needs: [metadata, build]
+    if: >-
+      always() && needs.metadata.result == 'success' &&
+      needs.metadata.outputs.enabled == 'true' && inputs.dry_run != true &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.metadata.outputs.sha }}
+          fetch-depth: 0
+      - name: Create tag and release on the verified commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+          RELEASE_SHA: ${{ needs.metadata.outputs.sha }}
+          CREATE_RELEASE: ${{ needs.metadata.outputs.create_release }}
+        run: |
+          tag="v$RELEASE_VERSION"
+          if git rev-parse --verify "refs/tags/$tag" >/dev/null 2>&1; then
+            test "$(git rev-list -n 1 "$tag")" = "$RELEASE_SHA"
+          else
+            git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' tag -a "$tag" "$RELEASE_SHA" -m "Release $tag"
+            git push origin "refs/tags/$tag"
+          fi
+          if [ "$CREATE_RELEASE" = "true" ] && ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" --verify-tag --repo "$GITHUB_REPOSITORY" --title "$tag" --generate-notes
+          fi
+
+  upload:
+    needs: [metadata, build, tag]
+    if: needs.metadata.outputs.publish == 'true' && needs.metadata.outputs.has_packages == 'true' && inputs.dry_run != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        ecosystem: ${{ fromJSON(needs.metadata.outputs.ecosystems) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.metadata.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-${{ matrix.ecosystem }}-${{ needs.metadata.outputs.sha }}
+          path: ${{ runner.temp }}/release-artifacts/
+      - name: Validate package-only artifacts
+        env:
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+          ECOSYSTEM: ${{ matrix.ecosystem }}
+          ARTIFACT_DIR: ${{ runner.temp }}/release-artifacts
+        run: node .github/lights-on/runner/release-artifacts.mjs --validate
+      - name: Prepare validated PyPI distributions
+        if: matrix.ecosystem == 'pypi'
+        run: |
+          mkdir "$RUNNER_TEMP/distributions"
+          find "$RUNNER_TEMP/release-artifacts" -maxdepth 1 -type f \( -name '*.whl' -o -name '*.tar.gz' \) -exec cp -- {} "$RUNNER_TEMP/distributions/" \;
+      - name: Publish PyPI distributions without executing build backends
+        if: matrix.ecosystem == 'pypi'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: ${{ runner.temp }}/distributions/
+          password: ${{ secrets.PYPI_API_TOKEN }}
+      - name: Upload prebuilt package with only this registry's credential
+        if: matrix.ecosystem != 'pypi'
+        env:
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+          ECOSYSTEM: ${{ matrix.ecosystem }}
+          ARTIFACT_DIR: ${{ runner.temp }}/release-artifacts
+          REGISTRY_TOKEN: ${{ (matrix.ecosystem == 'npm' && secrets.NPM_TOKEN) || (matrix.ecosystem == 'crates' && secrets.CARGO_REGISTRY_TOKEN) || (matrix.ecosystem == 'nuget' && secrets.NUGET_API_KEY) || (matrix.ecosystem == 'rubygems' && secrets.GEM_HOST_API_KEY) || '' }}
+        run: node .github/lights-on/runner/release-artifacts.mjs --upload

@@ -1,0 +1,81 @@
+# Lights On — Autonomous Open Source Maintenance Configuration
+# Zero-required-configuration defaults. Any setting below can be overridden here
+# or via GitHub Repository Variables (e.g. LIGHTS_ON_ENABLED, LIGHTS_ON_PROVIDER,
+# LIGHTS_ON_MODEL, LIGHTS_ON_ALLOW_EXTERNAL_PR_AUTOMERGE).
+
+version: 1
+
+# Global kill switch (can also be set via GitHub Repository Variable LIGHTS_ON_ENABLED=false)
+enabled: true
+
+engine:
+  # 'auto' detects available credentials in order: copilot -> claude -> codex -> openrouter
+  provider: auto
+  # Leave blank ("") to use provider-specific defaults:
+  #   default:   copilot=claude-sonnet-5.5 | claude=claude-sonnet-5-5 | codex=gpt-6.1-sol | openrouter=anthropic/claude-sonnet-5.5
+  #   reasoning: copilot=claude-opus-5.5   | claude=claude-opus-5-5   | codex=gpt-6-astra | openrouter=anthropic/claude-opus-5.5
+  models:
+    default: ""
+    reasoning: ""
+  fallback_providers: []
+
+threat_model:
+  path: THREAT_MODEL.md
+  generator_repo: https://github.com/alpha-omega-security/threat-model
+  triage_policy: relaxed
+
+upstream:
+  # Upstream repository ('owner/repo' or 'auto' to auto-detect GitHub fork parent; '' or 'none' to disable).
+  # IMPORTANT: Upstream access is strictly READ-ONLY. Lights On never writes to any repository other than the one it is installed in.
+  repo: none
+  sync_issues: true
+  sync_prs: false
+  sync_threat_model_context: true
+  max_items_per_run: 3
+
+autonomy:
+  # 'lights-on' (full autonomy within policy boundaries) or 'review-only' (never auto-merges)
+  mode: lights-on
+  # External contributor PRs require human merge by default; agent-authored PRs can auto-merge
+  allow_external_pr_automerge: false
+  allow_agent_pr_automerge: true
+  merge_method: squash
+  require_ci_pass: true
+  # Set the exact required CI contexts and their GitHub App IDs.
+  # Empty means review-only until configured; a lone successful workflow is not sufficient.
+  # Example: [{ context: "build", app_id: 15368 }]
+  # For a legacy commit status use app_id: null.
+  required_checks: []
+  require_independent_agent_review: true
+
+policies:
+  block_automerge_on:
+    - breaking_public_api
+    - workflow_or_runner_modification
+    - new_unapproved_runtime_dependency
+    - threat_model_boundary_weakening
+  dependency_health:
+    stale_release_months: 24
+    min_maintainers: 1
+    auto_migrate_deprecated_or_archived: true
+    auto_migrate_unpatched_cve: true
+
+limits:
+  max_prs_per_run: 2
+  max_attempts_per_issue: 2
+  max_issue_responses_per_hour: 10
+  max_agent_runs_per_day: 4
+  max_turns_per_run: 25
+  max_tokens_per_run: 100000
+  max_cost_per_run_usd: 2.0
+  max_daily_budget_usd: 10.0
+
+release:
+  enabled: false
+  auto_publish: true
+  # Maximum semver bump Lights On may release autonomously ('patch' or 'minor'; never 'major')
+  max_auto_bump: minor
+  min_commits_for_release: 1
+  immediate_on_security: true
+  create_github_release: true
+  provenance: true

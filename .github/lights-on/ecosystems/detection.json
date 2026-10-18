@@ -1,0 +1,74 @@
+{
+  "npm": {
+    "markers": ["package.json"],
+    "registry": "npmjs.org",
+    "osv_ecosystem": "npm",
+    "install_cmd": "npm ci || npm install",
+    "test_cmd": "npm test",
+    "audit_cmd": "npm audit --json",
+    "lockfiles": ["package-lock.json", "yarn.lock", "pnpm-lock.yaml"]
+  },
+  "python": {
+    "markers": ["pyproject.toml", "requirements.txt", "setup.py", "Pipfile"],
+    "registry": "pypi.org",
+    "osv_ecosystem": "PyPI",
+    "install_cmd": "pip install -e . || pip install -r requirements.txt",
+    "test_cmd": "pytest",
+    "audit_cmd": "pip-audit --format json",
+    "lockfiles": ["poetry.lock", "Pipfile.lock", "uv.lock", "requirements.txt"]
+  },
+  "rust": {
+    "markers": ["Cargo.toml"],
+    "registry": "crates.io",
+    "osv_ecosystem": "crates.io",
+    "install_cmd": "cargo fetch",
+    "test_cmd": "cargo test",
+    "audit_cmd": "cargo audit --json",
+    "lockfiles": ["Cargo.lock"]
+  },
+  "go": {
+    "markers": ["go.mod"],
+    "registry": "proxy.golang.org",
+    "osv_ecosystem": "Go",
+    "install_cmd": "go mod download",
+    "test_cmd": "go test ./...",
+    "audit_cmd": "govulncheck -json ./...",
+    "lockfiles": ["go.sum"]
+  },
+  "dotnet": {
+    "markers": ["*.sln", "*.csproj", "Directory.Build.props", "global.json"],
+    "registry": "nuget.org",
+    "osv_ecosystem": "NuGet",
+    "install_cmd": "dotnet restore",
+    "test_cmd": "dotnet test",
+    "audit_cmd": "dotnet list package --vulnerable --include-transitive --format json",
+    "lockfiles": ["packages.lock.json"]
+  },
+  "ruby": {
+    "markers": ["Gemfile", "*.gemspec"],
+    "registry": "rubygems.org",
+    "osv_ecosystem": "RubyGems",
+    "install_cmd": "bundle install",
+    "test_cmd": "bundle exec rake test || bundle exec rspec",
+    "audit_cmd": "bundle-audit check --format json",
+    "lockfiles": ["Gemfile.lock"]
+  },
+  "java": {
+    "markers": ["pom.xml", "build.gradle", "build.gradle.kts"],
+    "registry": "repo1.maven.org",
+    "osv_ecosystem": "Maven",
+    "install_cmd": "mvn dependency:resolve || ./gradlew dependencies",
+    "test_cmd": "mvn test || ./gradlew test",
+    "audit_cmd": "mvn org.owasp:dependency-check-maven:check",
+    "lockfiles": ["gradle.lockfile"]
+  },
+  "c": {
+    "markers": ["CMakeLists.txt", "Makefile", "configure.ac", "meson.build"],
+    "registry": null,
+    "osv_ecosystem": "OSS-Fuzz",
+    "install_cmd": "cmake -B build",
+    "test_cmd": "ctest --test-dir build --output-on-failure || make test",
+    "audit_cmd": null,
+    "lockfiles": ["conan.lock", "vcpkg.json"]
+  }
+}

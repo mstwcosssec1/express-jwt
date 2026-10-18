@@ -1,0 +1,337 @@
+name: Lights On - PR Review & Auto-Merge Gatekeeper
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+  workflow_run:
+    workflows: ["CI", "Lights On - Self Test CI"]
+    types: [completed]
+
+concurrency:
+  group: lights-on-pr-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  checks: read
+  actions: read
+
+jobs:
+  review-and-gate:
+    name: 4-Gate Review & Auto-Merge Verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    if: vars.LIGHTS_ON_ENABLED != 'false'
+    steps:
+      # Step 1 — Checkout ONLY base branch so untrusted fork code is NEVER executed
+      - name: Checkout base branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: Load Lights On configuration
+        id: config
+        env:
+          LIGHTS_ON_ENABLED: ${{ vars.LIGHTS_ON_ENABLED }}
+          LIGHTS_ON_ALLOW_EXTERNAL_PR_AUTOMERGE: ${{ vars.LIGHTS_ON_ALLOW_EXTERNAL_PR_AUTOMERGE }}
+        run: node .github/lights-on/runner/load-config.mjs --github-output
+
+      # Step 2 — Fetch PR details, changed files, and unified diff into /tmp/
+      - name: Fetch PR metadata, changed files, and diff via gh api
+        id: pr-data
+        if: steps.config.outputs.enabled != 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_FULL_NAME: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER_FROM_EVENT: ${{ github.event.pull_request.number }}
+          WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          EVENT_JSON: ${{ toJson(github.event) }}
+        run: |
+          node --input-type=module << 'EOF'
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          import { configuredCiStatus } from './.github/lights-on/runner/verify-ci.mjs';
+          import { sanitizeGitHubOutputValue } from './.github/lights-on/runner/load-config.mjs';
+
+          const sha256File = (filePath) =>
+            crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+
+          const repo = process.env.REPO_FULL_NAME;
+          const event = JSON.parse(process.env.EVENT_JSON || '{}');
+          let prNumber = process.env.PR_NUMBER_FROM_EVENT || '';
+
+          if (!prNumber && event.workflow_run) {
+            const prs = event.workflow_run.pull_requests || [];
+            if (prs.length > 0 && prs[0].number) {
+              prNumber = String(prs[0].number);
+            } else if (process.env.WORKFLOW_RUN_HEAD_SHA) {
+              const openPrsRaw = execFileSync('gh', [
+                'api', `repos/${repo}/pulls?state=open&per_page=50`
+              ], { encoding: 'utf8' });
+              const openPrs = JSON.parse(openPrsRaw);
+              const matched = openPrs.find(p => p.head && p.head.sha === process.env.WORKFLOW_RUN_HEAD_SHA);
+              if (matched) prNumber = String(matched.number);
+            }
+          }
+
+          if (!prNumber || !/^\d+$/.test(String(prNumber))) {
+            console.log('No associated open PR found for this event; skipping.');
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, 'has_pr=false\n');
+            process.exit(0);
+          }
+
+          const prJsonRaw = execFileSync('gh', ['api', `repos/${repo}/pulls/${prNumber}`], { encoding: 'utf8' });
+          const prData = JSON.parse(prJsonRaw);
+          fs.writeFileSync('/tmp/pr.json', JSON.stringify(prData, null, 2), 'utf8');
+
+          const prFilesRaw = execFileSync('gh', ['api', '--paginate', '--slurp', `repos/${repo}/pulls/${prNumber}/files`], { encoding: 'utf8' });
+          const prFilesNormalized = JSON.parse(prFilesRaw).flat();
+          fs.writeFileSync('/tmp/pr-files.json', JSON.stringify(prFilesNormalized, null, 2), 'utf8');
+
+          const prDiff = execFileSync('gh', [
+            'api', `repos/${repo}/pulls/${prNumber}`,
+            '-H', 'Accept: application/vnd.github.v3.diff'
+          ], { encoding: 'utf8' });
+          fs.writeFileSync('/tmp/pr.diff', prDiff, 'utf8');
+          const freshPr = JSON.parse(execFileSync('gh', ['api', `repos/${repo}/pulls/${prNumber}`], { encoding: 'utf8' }));
+          if (freshPr.head?.sha !== prData.head?.sha || freshPr.changed_files !== prData.changed_files) {
+            throw new Error('PR changed while collecting review inputs; refusing inconsistent snapshot.');
+          }
+
+          const prJsonHash = sha256File('/tmp/pr.json');
+          const prFilesHash = sha256File('/tmp/pr-files.json');
+          const prDiffHash = sha256File('/tmp/pr.diff');
+
+          const headSha = String(prData.head?.sha || '');
+          // Comments (even bot comments) are not authenticated approval artifacts.
+          const needsReview = 'true';
+          const ciStatus = configuredCiStatus(repo, headSha);
+          const outLines = [
+            'has_pr=true',
+            `pr_number=${sanitizeGitHubOutputValue(prNumber)}`,
+            `head_sha=${sanitizeGitHubOutputValue(headSha)}`,
+            `needs_review=${needsReview}`,
+            `ci_status=${sanitizeGitHubOutputValue(ciStatus)}`,
+            `pr_json_sha256=${prJsonHash}`,
+            `pr_files_sha256=${prFilesHash}`,
+            `pr_diff_sha256=${prDiffHash}`
+          ];
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, outLines.join('\n') + '\n');
+          EOF
+
+      # Step 3 — Run scan-dependencies.mjs so Gate 3 has live downstream dependent package data
+      - name: Scan dependencies and downstream ecosystem dependents
+        if: steps.config.outputs.enabled != 'false' && steps.pr-data.outputs.has_pr == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node .github/lights-on/runner/scan-dependencies.mjs --output /tmp/lights-on-deps.json
+
+      # Step 4 — Run pre-flight safety check
+      - name: Run pre-flight PR safety check
+        id: preflight
+        if: steps.config.outputs.enabled != 'false' && steps.pr-data.outputs.has_pr == 'true'
+        env:
+          LIGHTS_ON_ALLOW_EXTERNAL_PR_AUTOMERGE: ${{ vars.LIGHTS_ON_ALLOW_EXTERNAL_PR_AUTOMERGE }}
+        run: |
+          node .github/lights-on/runner/verify-pr-safety.mjs \
+            --pr-file /tmp/pr.json \
+            --files-file /tmp/pr-files.json \
+            --diff-file /tmp/pr.diff \
+            --github-output
+
+      # Step 5 — Review fresh inputs; comments are never used as cached approvals
+      - name: Run 4-Gate Independent Review
+        if: >-
+          steps.config.outputs.enabled != 'false' &&
+          steps.pr-data.outputs.has_pr == 'true' &&
+          steps.pr-data.outputs.needs_review == 'true' &&
+          (steps.preflight.outputs.safeToReview == 'true' || steps.preflight.outputs.safe_to_review == 'true')
+        uses: ./.github/actions/lights-on-agent
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          LIGHTS_ON_READ_ONLY: 'true'
+        with:
+          task: pr-reviewer
+          tier: reasoning
+          event_file: /tmp/pr.json
+          context_file: /tmp/lights-on-deps.json,/tmp/pr-files.json,/tmp/pr.diff
+          output_file: /tmp/pr-review-result.json
+
+      # Step 6 — Post the structured review (APPROVE, REQUEST_CHANGES, or COMMENT) with lights-on-state
+      - name: Post structured 4-Gate review and update labels
+        if: >-
+          steps.config.outputs.enabled != 'false' &&
+          steps.pr-data.outputs.has_pr == 'true' &&
+          steps.pr-data.outputs.needs_review == 'true' &&
+          (steps.preflight.outputs.safeToReview == 'true' || steps.preflight.outputs.safe_to_review == 'true')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr-data.outputs.pr_number }}
+          HEAD_SHA: ${{ steps.pr-data.outputs.head_sha }}
+        run: |
+          node --input-type=module << 'EOF'
+          import fs from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          import { sanitizeAgentLabelChanges, formatStateComment } from './.github/lights-on/runner/state-store.mjs';
+          import { assertWriteTargetIsInstalledRepo, neutralizeCrossRepoAutoLinks } from './.github/lights-on/runner/sync-upstream.mjs';
+
+          const installedRepo = assertWriteTargetIsInstalledRepo(process.env.GITHUB_REPOSITORY, process.env.GITHUB_REPOSITORY);
+          const upstreamRepo = process.env.LIGHTS_ON_UPSTREAM_REPO || '';
+
+          const reviewFile = '/tmp/pr-review-result.json';
+          if (!fs.existsSync(reviewFile)) {
+            console.log('No /tmp/pr-review-result.json found; skipping review submission.');
+            process.exit(0);
+          }
+
+          const review = JSON.parse(fs.readFileSync(reviewFile, 'utf8'));
+          const prNumber = process.env.PR_NUMBER;
+          const headSha = process.env.HEAD_SHA;
+
+          const { labelsToAdd, labelsToRemove } = sanitizeAgentLabelChanges(
+            review.labels_to_add,
+            review.labels_to_remove,
+            { readOnly: true }
+          );
+          const gateResults = review.gate_results || review.gates || null;
+          const breakingApiChange = Boolean(review.breaking_api_change);
+
+          const verdict = String(review.verdict || review.disposition || 'COMMENT').toUpperCase();
+          const stateMeta = {
+            task: 'pr-reviewer',
+            head_sha: headSha,
+            verdict,
+            gates: gateResults,
+            review_result: {
+              verdict,
+              gates: gateResults,
+              gate_results: gateResults,
+              breaking_api_change: breakingApiChange,
+              labels_to_add: labelsToAdd,
+              labels_to_remove: labelsToRemove
+            },
+            reviewed_at: new Date().toISOString()
+          };
+
+          const rawBody = neutralizeCrossRepoAutoLinks(
+            review.comment_body || review.summary || `Lights On 4-Gate Review completed with verdict: **${verdict}**.`,
+            upstreamRepo,
+            { installedRepo }
+          );
+          const fullBody = formatStateComment(rawBody, stateMeta);
+          fs.writeFileSync('/tmp/pr-review-body.md', fullBody, 'utf8');
+
+          let reviewFlag = '--comment';
+          if (verdict === 'APPROVE' || verdict === 'APPROVED') reviewFlag = '--approve';
+          else if (verdict === 'REQUEST_CHANGES' || verdict === 'CHANGES_REQUESTED') reviewFlag = '--request-changes';
+
+          try {
+            execFileSync('gh', ['pr', 'review', prNumber, '--repo', installedRepo, reviewFlag, '--body-file', '/tmp/pr-review-body.md'], { stdio: 'inherit' });
+          } catch (err) {
+            console.warn('gh pr review fallback to gh issue comment (e.g. self-authored PR):', err.message);
+            execFileSync('gh', ['issue', 'comment', prNumber, '--repo', installedRepo, '--body-file', '/tmp/pr-review-body.md'], { stdio: 'inherit' });
+          }
+
+          const removeSet = new Set(labelsToRemove);
+          removeSet.add('lights-on:re-review');
+
+          if (labelsToAdd.length > 0) {
+            try {
+              execFileSync('gh', ['pr', 'edit', prNumber, '--repo', installedRepo, '--add-label', labelsToAdd.join(',')], { stdio: 'inherit' });
+            } catch {}
+          }
+          if (removeSet.size > 0) {
+            try {
+              execFileSync('gh', ['pr', 'edit', prNumber, '--repo', installedRepo, '--remove-label', Array.from(removeSet).join(',')], { stdio: 'inherit' });
+            } catch {}
+          }
+          EOF
+
+      # Step 7 — Verify PR artifact integrity and run final merge safety gate
+      - name: Run final merge safety gate
+        id: merge-gate
+        if: steps.config.outputs.enabled != 'false' && steps.pr-data.outputs.has_pr == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr-data.outputs.pr_number }}
+          LIGHTS_ON_ALLOW_EXTERNAL_PR_AUTOMERGE: ${{ vars.LIGHTS_ON_ALLOW_EXTERNAL_PR_AUTOMERGE }}
+          CI_STATUS: ${{ steps.pr-data.outputs.ci_status }}
+          HEAD_SHA: ${{ steps.pr-data.outputs.head_sha }}
+          EXPECTED_PR_JSON_SHA256: ${{ steps.pr-data.outputs.pr_json_sha256 }}
+          EXPECTED_PR_FILES_SHA256: ${{ steps.pr-data.outputs.pr_files_sha256 }}
+          EXPECTED_PR_DIFF_SHA256: ${{ steps.pr-data.outputs.pr_diff_sha256 }}
+        run: |
+          CI_STATUS=$(node --input-type=module -e 'import { configuredCiStatus } from "./.github/lights-on/runner/verify-ci.mjs"; console.log(configuredCiStatus(process.env.GITHUB_REPOSITORY, process.env.HEAD_SHA));')
+          export CI_STATUS
+          node -e '
+            const crypto = require("node:crypto");
+            const fs = require("node:fs");
+            const hash = (p) => crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex");
+            if (hash("/tmp/pr.json") !== process.env.EXPECTED_PR_JSON_SHA256 ||
+                hash("/tmp/pr-files.json") !== process.env.EXPECTED_PR_FILES_SHA256 ||
+                hash("/tmp/pr.diff") !== process.env.EXPECTED_PR_DIFF_SHA256) {
+              console.error("CRITICAL: PR metadata/diff files in /tmp were modified after initial fetch! Aborting merge gate.");
+              process.exit(1);
+            }
+          '
+          node .github/lights-on/runner/verify-pr-safety.mjs \
+            --pr-file /tmp/pr.json \
+            --files-file /tmp/pr-files.json \
+            --diff-file /tmp/pr.diff \
+            --review-file /tmp/pr-review-result.json \
+            --ci-status "$CI_STATUS" \
+            --github-output > /tmp/merge-gate-decision.json
+          rec_labels=$(node -e 'const fs=require("node:fs"); const d=JSON.parse(fs.readFileSync("/tmp/merge-gate-decision.json","utf8")); console.log((d.recommendedLabels||[]).join(","));')
+          if [ -n "$rec_labels" ]; then
+            gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --add-label "$rec_labels" || true
+          fi
+
+      - name: Auto-merge PR when all gates pass
+        if: >-
+          steps.config.outputs.enabled != 'false' &&
+          steps.pr-data.outputs.has_pr == 'true' &&
+          (steps.merge-gate.outputs.allowAutoMerge == 'true' || steps.merge-gate.outputs.allow_auto_merge == 'true')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr-data.outputs.pr_number }}
+          HEAD_SHA: ${{ steps.pr-data.outputs.head_sha }}
+          MERGE_METHOD: ${{ steps.merge-gate.outputs.mergeMethod || steps.merge-gate.outputs.merge_method || steps.config.outputs.mergeMethod || steps.config.outputs.merge_method || 'squash' }}
+        run: |
+          is_draft=$(node -e 'const fs=require("node:fs"); const pr=JSON.parse(fs.readFileSync("/tmp/pr.json","utf8")); console.log(Boolean(pr.draft));')
+          if [ "$is_draft" = "true" ]; then
+            gh pr ready "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" || true
+          fi
+          case "$MERGE_METHOD" in
+            merge) method_flag="--merge" ;;
+            rebase) method_flag="--rebase" ;;
+            *) method_flag="--squash" ;;
+          esac
+          gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" "$method_flag" --match-head-commit "$HEAD_SHA"
+
+      - name: Handle external PR auto-merge policy block
+        if: >-
+          steps.config.outputs.enabled != 'false' &&
+          steps.pr-data.outputs.has_pr == 'true' &&
+          (steps.merge-gate.outputs.externalAutoMergeBlocked == 'true' || steps.merge-gate.outputs.external_auto_merge_blocked == 'true')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr-data.outputs.pr_number }}
+        run: |
+          echo "::notice::External PR #$PR_NUMBER passed all 4 review gates, but external PR auto-merge is disabled by repository configuration (allow_external_pr_automerge: false). A human maintainer can apply the 'lights-on:automerge' label or merge manually."
+          gh label create "lights-on:automerge-disabled-external" --repo "$GITHUB_REPOSITORY" --color "FBCA04" --description "External PR passed gates; awaiting human merge per repo config" --force || true
+          gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --add-label "lights-on:automerge-disabled-external" || true

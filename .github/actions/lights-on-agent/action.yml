@@ -1,0 +1,135 @@
+name: "Lights On Autonomous Agent"
+description: "Composite action that runs the Lights On multi-engine autonomous maintenance agent (Copilot, Claude, Codex, OpenRouter)."
+
+inputs:
+  task:
+    description: "Lights On maintenance task name (e.g., bootstrap-threat-model, issue-responder, pr-reviewer, dependency-maintainer, security-remediator, docs-clarifier)"
+    required: true
+  tier:
+    description: "Model routing tier: default or reasoning"
+    required: false
+    default: "default"
+  event_file:
+    description: "Optional path to serialized GitHub event JSON payload"
+    required: false
+    default: ""
+  context_file:
+    description: "Optional path (or comma-separated paths) to additional context files"
+    required: false
+    default: ""
+  output_file:
+    description: "Path where the structured agent JSON output will be written"
+    required: false
+    default: "/tmp/lights-on-result.json"
+  install_threat_model_skills:
+    description: "Whether to clone and install alpha-omega-security/threat-model skills into .claude/skills and .github/skills"
+    required: false
+    default: "false"
+
+outputs:
+  status:
+    description: "Execution status (completed, skipped, failed)"
+    value: ${{ steps.run-agent.outputs.status }}
+  provider:
+    description: "Resolved LLM provider (copilot, claude, codex, openrouter)"
+    value: ${{ steps.run-agent.outputs.provider }}
+  model:
+    description: "Resolved model identifier"
+    value: ${{ steps.run-agent.outputs.model }}
+  verdict:
+    description: "Review or triage verdict (APPROVE, REQUEST_CHANGES, COMMENT, NONE)"
+    value: ${{ steps.run-agent.outputs.verdict }}
+  action_taken:
+    description: "Action taken by the agent"
+    value: ${{ steps.run-agent.outputs.action_taken }}
+  risk_level:
+    description: "Assessed risk level (low, medium, high, critical)"
+    value: ${{ steps.run-agent.outputs.risk_level }}
+  result_file:
+    description: "Path to the structured JSON result file"
+    value: ${{ steps.run-agent.outputs.result_file }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup Node.js 24
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: "24"
+
+    - name: Restore and save Lights On cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          /tmp/lights-on-cache
+          /tmp/lights-on-threat-model
+        key: lights-on-cache-${{ github.repository }}-${{ github.run_id }}
+        restore-keys: |
+          lights-on-cache-${{ github.repository }}-
+
+    - name: Check Lights On configuration and enabled state
+      id: check-config
+      shell: bash
+      run: |
+        node .github/lights-on/runner/load-config.mjs --github-output
+
+    - name: Require isolated command worker
+      if: steps.check-config.outputs.enabled != 'false'
+      shell: bash
+      run: |
+        docker info > /dev/null
+
+    - name: Install inference-only Copilot CLI
+      if: steps.check-config.outputs.enabled != 'false' && env.COPILOT_GITHUB_TOKEN != ''
+      shell: bash
+      working-directory: ${{ runner.temp }}
+      run: npm install --global --ignore-scripts @github/copilot@1.0.98
+
+    - name: Install alpha-omega-security/threat-model skills
+      if: steps.check-config.outputs.enabled != 'false' && inputs.install_threat_model_skills == 'true'
+      shell: bash
+      run: |
+        node --input-type=module -e 'import { ensureThreatModelSkills } from "./.github/lights-on/runner/ensure-threat-model.mjs"; ensureThreatModelSkills({ installToWorkspace: false });'
+
+    - name: Run Lights On multi-engine agent
+      id: run-agent
+      shell: bash
+      env:
+        INPUT_TASK: ${{ inputs.task }}
+        INPUT_TIER: ${{ inputs.tier }}
+        INPUT_EVENT_FILE: ${{ inputs.event_file }}
+        INPUT_CONTEXT_FILE: ${{ inputs.context_file }}
+        INPUT_OUTPUT_FILE: ${{ inputs.output_file }}
+        CONFIG_ENABLED: ${{ steps.check-config.outputs.enabled }}
+        CHECK_PROVIDER: ${{ steps.check-config.outputs.provider }}
+        CHECK_MODEL: ${{ steps.check-config.outputs.model }}
+        LIGHTS_ON_UPSTREAM_REPO: ${{ steps.check-config.outputs.upstream_repo }}
+        LIGHTS_ON_SANDBOX_IMAGE: ${{ vars.LIGHTS_ON_SANDBOX_IMAGE }}
+      run: |
+        if [ "$CONFIG_ENABLED" = "false" ] || [ "$LIGHTS_ON_ENABLED" = "false" ]; then
+          echo "Lights On is disabled (LIGHTS_ON_ENABLED=false); skipping agent execution."
+          {
+            echo "status=skipped"
+            echo "provider=${CHECK_PROVIDER//[$'\r\n']/}"
+            echo "model=${CHECK_MODEL//[$'\r\n']/}"
+            echo "verdict=NONE"
+            echo "action_taken=disabled"
+            echo "risk_level=low"
+            echo "result_file=${INPUT_OUTPUT_FILE//[$'\r\n']/}"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        args=(--task "$INPUT_TASK" --tier "$INPUT_TIER" --output "$INPUT_OUTPUT_FILE")
+        if [ "$INPUT_TASK" = "bootstrap-threat-model" ]; then
+          args+=(--context-file /tmp/lights-on-threat-model/skills/threat-model/SKILL.md)
+        fi
+        if [ -n "$INPUT_EVENT_FILE" ]; then
+          args+=(--event-file "$INPUT_EVENT_FILE")
+        fi
+        if [ -n "$INPUT_CONTEXT_FILE" ]; then
+          args+=(--context-file "$INPUT_CONTEXT_FILE")
+        fi
+
+        node .github/lights-on/runner/run-agent.mjs "${args[@]}"
+        echo "result_file=${INPUT_OUTPUT_FILE//[$'\r\n']/}" >> "$GITHUB_OUTPUT"

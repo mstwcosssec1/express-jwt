@@ -1,0 +1,855 @@
+{
+  "scannedAt": "2026-10-17T20:36:41.536Z",
+  "packages": [
+    {
+      "ecosystem": "npm",
+      "registry": "npmjs.org",
+      "osvEcosystem": "npm",
+      "name": "express-jwt",
+      "version": "8.5.1",
+      "manifest": "package.json",
+      "engines": {
+        "node": ">= 8.0.0"
+      }
+    }
+  ],
+  "downstreamDependents": {
+    "dependentPackagesCount": 774,
+    "downloads": 3705661,
+    "topDependents": [
+      {
+        "name": "@nandu/service",
+        "downloads": 20,
+        "latest_release_number": "1.0.0"
+      },
+      {
+        "name": "testnodewilliam",
+        "downloads": 8,
+        "latest_release_number": "1.0.6"
+      },
+      {
+        "name": "express-rest-api-boilerplate",
+        "downloads": 10,
+        "latest_release_number": "1.0.2"
+      },
+      {
+        "name": "quick-credit-api",
+        "downloads": 1,
+        "latest_release_number": "1.0.2"
+      },
+      {
+        "name": "node-service-tools",
+        "downloads": 8,
+        "latest_release_number": "0.2.21"
+      },
+      {
+        "name": "@noomz/auth",
+        "downloads": 4,
+        "latest_release_number": "4.9.0"
+      },
+      {
+        "name": "@eyedea/n8n-nodes-eyedea",
+        "downloads": 24,
+        "latest_release_number": "0.0.6"
+      },
+      {
+        "name": "nuxt-acl",
+        "downloads": 4,
+        "latest_release_number": "1.0.3"
+      },
+      {
+        "name": "fractal-authentication",
+        "downloads": 51,
+        "latest_release_number": "2.2.2"
+      },
+      {
+        "name": "expressjs-backend",
+        "downloads": 36,
+        "latest_release_number": "0.1.9"
+      },
+      {
+        "name": "unicode-1",
+        "downloads": 4,
+        "latest_release_number": "0.1.0"
+      },
+      {
+        "name": "ns-meanio",
+        "downloads": 0,
+        "latest_release_number": "0.8.85"
+      },
+      {
+        "name": "epi-client-service",
+        "downloads": 4,
+        "latest_release_number": "0.0.16"
+      },
+      {
+        "name": "pulse-fleet",
+        "downloads": 0,
+        "latest_release_number": "1.0.2"
+      },
+      {
+        "name": "@krypton-org/krypton-auth",
+        "downloads": 166,
+        "latest_release_number": "1.3.2"
+      },
+      {
+        "name": "cuke-helpr",
+        "downloads": 7,
+        "latest_release_number": "3.1.2"
+      },
+      {
+        "name": "quicknap",
+        "downloads": 29,
+        "latest_release_number": "0.1.2"
+      },
+      {
+        "name": "ghost_zh_cjs",
+        "downloads": 25,
+        "latest_release_number": "3.17.5"
+      },
+      {
+        "name": "users-in-roles-api",
+        "downloads": 5,
+        "latest_release_number": "0.0.1"
+      },
+      {
+        "name": "@alejeune/auth-next",
+        "downloads": 106,
+        "latest_release_number": "5.0.2"
+      }
+    ]
+  },
+  "dependencies": [
+    {
+      "ecosystem": "npm",
+      "registry": "npmjs.org",
+      "osvEcosystem": "npm",
+      "name": "@types/jsonwebtoken",
+      "versionSpec": "^9",
+      "resolvedVersion": null,
+      "dev": false,
+      "manifest": "package.json",
+      "latestVersion": "9.0.10",
+      "lastReleaseAt": "2025-06-16T07:36:00.187Z",
+      "maintainersCount": 1,
+      "status": "active",
+      "flags": {
+        "deprecated": false,
+        "archived": false,
+        "stale": false,
+        "bus_factor_risk": true,
+        "unresponsive": false,
+        "vulnerable": false,
+        "outdated": false
+      },
+      "cves": [],
+      "bumpType": null,
+      "recommendedAction": "healthy"
+    },
+    {
+      "ecosystem": "npm",
+      "registry": "npmjs.org",
+      "osvEcosystem": "npm",
+      "name": "express-unless",
+      "versionSpec": "^2.1.3",
+      "resolvedVersion": "2.1.3",
+      "dev": false,
+      "manifest": "package.json",
+      "latestVersion": "2.1.3",
+      "lastReleaseAt": "2022-10-24T16:49:15.357Z",
+      "maintainersCount": 1,
+      "status": "active",
+      "flags": {
+        "deprecated": false,
+        "archived": false,
+        "stale": true,
+        "bus_factor_risk": true,
+        "unresponsive": false,
+        "vulnerable": false,
+        "outdated": false
+      },
+      "cves": [],
+      "bumpType": null,
+      "recommendedAction": "healthy"
+    },
+    {
+      "ecosystem": "npm",
+      "registry": "npmjs.org",
+      "osvEcosystem": "npm",
+      "name": "jsonwebtoken",
+      "versionSpec": "^9.0.0",
+      "resolvedVersion": "9.0.0",
+      "dev": false,
+      "manifest": "package.json",
+      "latestVersion": "9.0.3",
+      "lastReleaseAt": "2025-12-04T10:27:57.257Z",
+      "maintainersCount": 1,
+      "status": "active",
+      "flags": {
+        "deprecated": false,
+        "archived": false,
+        "stale": false,
+        "bus_factor_risk": true,
+        "unresponsive": false,
+        "vulnerable": false,
+        "outdated": true
+      },
+      "cves": [],
+      "bumpType": "patch",
+      "recommendedAction": "bump-minor-or-patch"
+    },
+    {
+      "ecosystem": "npm",
+      "registry": "npmjs.org",
+      "osvEcosystem": "npm",
+      "name": "@types/express",
+      "versionSpec": "^4.17.16",
+      "resolvedVersion": "4.17.16",
+      "dev": true,
+      "manifest": "package.json",
+      "latestVersion": "5.0.6",
+      "lastReleaseAt": "2025-12-01T20:35:51.488Z",
+      "maintainersCount": 1,
+      "status": "active",
+      "flags": {
+        "deprecated": false,
+        "archived": false,
+        "stale": false,
+        "bus_factor_risk": true,
+        "unresponsive": false,
+        "vulnerable": false,
+        "outdated": true
+      },
+      "cves": [],
+      "bumpType": "major",
+      "recommendedAction": "evaluate-major-bump"
+    },
+    {
+      "ecosystem": "npm",
+      "registry": "npmjs.org",
+      "osvEcosystem": "npm",
+      "name": "@types/mocha",
+      "versionSpec": "^9.1.0",
+      "resolvedVersion": "9.1.0",
+      "dev": true,
+      "manifest": "package.json",
+      "latestVersion": "10.0.10",
+      "lastReleaseAt": "2024-11-20T18:38:25.531Z",
+      "maintainersCount": 1,
+      "status": "active",
+      "flags": {
+        "deprecated": false,
+        "archived": false,
+        "stale": false,
+        "bus_factor_risk": true,
+        "unresponsive": false,
+        "vulnerable": false,
+        "outdated": true
+      },
+      "cves": [],
+      "bumpType": "major",
+      "recommendedAction": "evaluate-major-bump"
+    },
+    {
+      "ecosystem": "npm",
+      "registry": "npmjs.org",
+      "osvEcosystem": "npm",
+      "name": "@types/node",
+      "versionSpec": "^18.19.130",
+      "resolvedVersion": "18.19.130",
+      "dev": true,
+      "manifest": "package.json",
+      "latestVersion": "26.6.4",
+      "lastReleaseAt": "2026-10-01T22:39:22.769Z",
+      "maintainersCount": 1,
+      "status": "active",
+      "flags": {
+        "deprecated": false,
+        "archived": false,
+        "stale": false,
+        "bus_factor_risk": true,
+        "unresponsive": false,
+        "vulnerable": false,
+        "outdated": true
+      },
+      "cves": [],
+      "bumpType": "major",
+      "recommendedAction": "evaluate-major-bump"
+    },
+    {
+      "ecosystem": "npm",
+      "registry": "npmjs.org",
+      "osvEcosystem": "npm",
+      "name": "@typescript-eslint/eslint-plugin",
+      "versionSpec": "^5.15.0",
+      "resolvedVersion": "5.15.0",
+      "dev": true,
+      "manifest": "package.json",
+      "latestVersion": "8.71.2",
+      "lastReleaseAt": "2026-10-12T17:09:51.996Z",
+      "maintainersCount": 2,
+      "status": "active",
+      "flags": {
+        "deprecated": false,
+        "archived": false,
+        "stale": false,
+        "bus_factor_risk": false,
+        "unresponsive": false,
+        "vulnerable": false,
+        "outdated": true
+      },
+      "cves": [],
+      "bumpType": "major",
+      "recommendedAction": "evaluate-major-bump"
+    },
+    {
+      "ecosystem": "npm",
+      "registry": "npmjs.org",
+      "osvEcosystem": "npm",
+      "name": "@typescript-eslint/parser",
+      "versionSpec": "^5.15.0",
+      "resolvedVersion": "5.15.0",
+      "dev": true,
+      "manifest": "package.json",
+      "latestVersion": "8.71.2",
+      "lastReleaseAt": "2026-10-12T17:11:57.903Z",
+      "maintainersCount": 2,
+      "status": "active",
+      "flags": {
+        "deprecated": false,
+        "archived": false,
+        "stale": false,
+        "bus_factor_risk": false,
+        "unresponsive": false,
+        "vulnerable": false,
+        "outdated": true
+      },
+      "cves": [],
+      "bumpType": "major",
+      "recommendedAction": "evaluate-major-bump"
+    },
+    {
+      "ecosystem": "npm",
+      "registry": "npmjs.org",
+      "osvEcosystem": "npm",
+      "name": "@commitlint/cli",
+      "versionSpec": "^20.3.1",
+      "resolvedVersion": "20.3.1",
+      "dev": true,
+      "manifest": "package.json",
+      "latestVersion": "21.2.3",
+      "lastReleaseAt": "2026-09-19T16:51:16.534Z",
+      "maintainersCount": 4,
+      "status": "active",
+      "flags": {
+        "deprecated": false,
+        "archived": false,
+        "stale": false,
+        "bus_factor_risk": false,
+        "unresponsive": false,
+        "vulnerable": false,
+        "outdated": true
+      },
+      "cves": [],
+      "bumpType": "major",
+      "recommendedAction": "evaluate-major-bump"
+    },
+    {
+      "ecosystem": "npm",
+      "registry": "npmjs.org",
+      "osvEcosystem": "npm",
+      "name": "@commitlint/config-conventional",
+      "versionSpec": "^20.3.1",
+      "resolvedVersion": "20.3.1",
+      "dev": true,
+      "manifest": "package.json",
+      "latestVersion": "21.2.3",
+      "lastReleaseAt": "2026-09-19T16:51:14.900Z",
+      "maintainersCount": 4,
+      "status": "active",
+      "flags": {
+        "deprecated": false,
+        "archived": false,
+        "stale": false,
+        "bus_factor_risk": false,
+        "unresponsive": false,
+        "vulnerable": false,
+        "outdated": true
+      },
+      "cves": [],
+      "bumpType": "major",
+      "recommendedAction": "evaluate-major-bump"
+    },
+    {
+      "ecosystem": "npm",
+      "registry": "npmjs.org",
+      "osvEcosystem": "npm",
+      "name": "@semantic-release/exec",
+      "versionSpec": "^7.1.0",
+      "resolvedVersion": "7.1.0",
+      "dev": true,
+      "manifest": "package.json",
+      "latestVersion": "7.1.0",
+      "lastReleaseAt": "2025-05-09T21:01:49.678Z",
+      "maintainersCount": 3,
+      "status": "active",
+      "flags": {
+        "deprecated": false,
+        "archived": false,
+        "stale": false,
+        "bus_factor_risk": false,
+        "unresponsive": false,
+        "vulnerable": false,
+        "outdated": false
+      },
+      "cves": [],
+      "bumpType": null,
+      "recommendedAction": "healthy"
+    },
+    {
+      "ecosystem": "npm",
+      "registry": "npmjs.org",
+      "osvEcosystem": "npm",
+      "name": "@semantic-release/git",
+      "versionSpec": "^10.0.1",
+      "resolvedVersion": "10.0.1",
+      "dev": true,
+      "manifest": "package.json",
+      "latestVersion": "11.0.1",
+      "lastReleaseAt": "2026-07-24T03:42:05.506Z",
+      "maintainersCount": 3,
+      "status": "active",
+      "flags": {
+        "deprecated": false,
+        "archived": false,
+        "stale": false,
+        "bus_factor_risk": false,
+        "unresponsive": false,
+        "vulnerable": false,
+        "outdated": true
+      },
+      "cves": [],
+      "bumpType": "major",
+      "recommendedAction": "evaluate-major-bump"
+    },
+    {
+      "ecosystem": "npm",
+      "registry": "npmjs.org",
+      "osvEcosystem": "npm",
+      "name": "conventional-changelog",
+      "versionSpec": "^7.2.1",
+      "resolvedVersion": "7.2.1",
+      "dev": true,
+      "manifest": "package.json",
+      "latestVersion": "8.1.3",
+      "lastReleaseAt": "2026-08-12T22:34:59.990Z",
+      "maintainersCount": 7,
+      "status": "active",
+      "flags": {
+        "deprecated": false,
+        "archived": false,
+        "stale": false,
+        "bus_factor_risk": false,
+        "unresponsive": false,
+        "vulnerable": false,
+        "outdated": true
+      },
+      "cves": [],
+      "bumpType": "major",
+      "recommendedAction": "evaluate-major-bump"
+    },
+    {
+      "ecosystem": "npm",
+      "registry": "npmjs.org",
+      "osvEcosystem": "npm",
+      "name": "conventional-changelog-conventionalcommits",
+      "versionSpec": "^9.3.0",
+      "resolvedVersion": "9.3.0",
+      "dev": true,
+      "manifest": "package.json",
+      "latestVersion": "10.4.1",
+      "lastReleaseAt": "2026-10-05T18:18:32.745Z",
+      "maintainersCount": 3,
+      "status": "active",
+      "flags": {
+        "deprecated": false,
+        "archived": false,
+        "stale": false,
+        "bus_factor_risk": false,
+        "unresponsive": false,
+        "vulnerable": false,
+        "outdated": true
+      },
+      "cves": [],
+      "bumpType": "major",
+      "recommendedAction": "evaluate-major-bump"
+    },
+    {
+      "ecosystem": "npm",
+      "registry": "npmjs.org",
+      "osvEcosystem": "npm",
+      "name": "eslint",
+      "versionSpec": "^8.11.0",
+      "resolvedVersion": "8.11.0",
+      "dev": true,
+      "manifest": "package.json",
+      "latestVersion": "10.13.0",
+      "lastReleaseAt": "2026-10-16T14:24:10.765Z",
+      "maintainersCount": 2,
+      "status": "active",
+      "flags": {
+        "deprecated": false,
+        "archived": false,
+        "stale": false,
+        "bus_factor_risk": false,
+        "unresponsive": false,
+        "vulnerable": false,
+        "outdated": true
+      },
+      "cves": [],
+      "bumpType": "major",
+      "recommendedAction": "evaluate-major-bump"
+    },
+    {
+      "ecosystem": "npm",
+      "registry": "npmjs.org",
+      "osvEcosystem": "npm",
+      "name": "express",
+      "versionSpec": "^4.17.3",
+      "resolvedVersion": "4.17.3",
+      "dev": true,
+      "manifest": "package.json",
+      "latestVersion": "5.3.0",
+      "lastReleaseAt": "2026-10-09T12:56:54.505Z",
+      "maintainersCount": 5,
+      "status": "active",
+      "flags": {
+        "deprecated": false,
+        "archived": false,
+        "stale": false,
+        "bus_factor_risk": false,
+        "unresponsive": false,
+        "vulnerable": true,
+        "outdated": true
+      },
+      "cves": [
+        {
+          "id": "GHSA-qw6h-vgh9-j6wx",
+          "modified": "2026-09-10T03:50:18.298562Z",
+          "fixedVersion": "5.3.0"
+        },
+        {
+          "id": "GHSA-rv95-896h-c2vc",
+          "modified": "2026-09-10T03:50:10.750068Z",
+          "fixedVersion": "5.3.0"
+        }
+      ],
+      "bumpType": "major",
+      "recommendedAction": "security-bump"
+    },
+    {
+      "ecosystem": "npm",
+      "registry": "npmjs.org",
+      "osvEcosystem": "npm",
+      "name": "husky",
+      "versionSpec": "^9.1.7",
+      "resolvedVersion": "9.1.7",
+      "dev": true,
+      "manifest": "package.json",
+      "latestVersion": "9.1.7",
+      "lastReleaseAt": "2024-11-18T15:28:26.026Z",
+      "maintainersCount": 1,
+      "status": "active",
+      "flags": {
+        "deprecated": false,
+        "archived": false,
+        "stale": false,
+        "bus_factor_risk": true,
+        "unresponsive": false,
+        "vulnerable": false,
+        "outdated": false
+      },
+      "cves": [],
+      "bumpType": null,
+      "recommendedAction": "healthy"
+    },
+    {
+      "ecosystem": "npm",
+      "registry": "npmjs.org",
+      "osvEcosystem": "npm",
+      "name": "mocha",
+      "versionSpec": "^10.2.0",
+      "resolvedVersion": "10.2.0",
+      "dev": true,
+      "manifest": "package.json",
+      "latestVersion": "12.0.3",
+      "lastReleaseAt": "2026-10-01T04:37:57.410Z",
+      "maintainersCount": 2,
+      "status": "active",
+      "flags": {
+        "deprecated": false,
+        "archived": false,
+        "stale": false,
+        "bus_factor_risk": false,
+        "unresponsive": false,
+        "vulnerable": false,
+        "outdated": true
+      },
+      "cves": [],
+      "bumpType": "major",
+      "recommendedAction": "evaluate-major-bump"
+    },
+    {
+      "ecosystem": "npm",
+      "registry": "npmjs.org",
+      "osvEcosystem": "npm",
+      "name": "prettier",
+      "versionSpec": "^2.6.0",
+      "resolvedVersion": "2.6.0",
+      "dev": true,
+      "manifest": "package.json",
+      "latestVersion": "3.9.10",
+      "lastReleaseAt": "2026-10-10T08:35:28.472Z",
+      "maintainersCount": 11,
+      "status": "active",
+      "flags": {
+        "deprecated": false,
+        "archived": false,
+        "stale": false,
+        "bus_factor_risk": false,
+        "unresponsive": false,
+        "vulnerable": false,
+        "outdated": true
+      },
+      "cves": [],
+      "bumpType": "major",
+      "recommendedAction": "evaluate-major-bump"
+    },
+    {
+      "ecosystem": "npm",
+      "registry": "npmjs.org",
+      "osvEcosystem": "npm",
+      "name": "semantic-release",
+      "versionSpec": "^25.0.2",
+      "resolvedVersion": "25.0.2",
+      "dev": true,
+      "manifest": "package.json",
+      "latestVersion": "25.0.9",
+      "lastReleaseAt": "2026-08-05T04:43:52.217Z",
+      "maintainersCount": 3,
+      "status": "active",
+      "flags": {
+        "deprecated": false,
+        "archived": false,
+        "stale": false,
+        "bus_factor_risk": false,
+        "unresponsive": false,
+        "vulnerable": false,
+        "outdated": true
+      },
+      "cves": [],
+      "bumpType": "patch",
+      "recommendedAction": "bump-minor-or-patch"
+    },
+    {
+      "ecosystem": "npm",
+      "registry": "npmjs.org",
+      "osvEcosystem": "npm",
+      "name": "ts-node",
+      "versionSpec": "^10.7.0",
+      "resolvedVersion": "10.7.0",
+      "dev": true,
+      "manifest": "package.json",
+      "latestVersion": "10.9.2",
+      "lastReleaseAt": "2023-12-08T12:04:46.154Z",
+      "maintainersCount": 2,
+      "status": "active",
+      "flags": {
+        "deprecated": false,
+        "archived": false,
+        "stale": true,
+        "bus_factor_risk": false,
+        "unresponsive": false,
+        "vulnerable": false,
+        "outdated": true
+      },
+      "cves": [],
+      "bumpType": "minor",
+      "recommendedAction": "bump-minor-or-patch"
+    },
+    {
+      "ecosystem": "npm",
+      "registry": "npmjs.org",
+      "osvEcosystem": "npm",
+      "name": "typescript",
+      "versionSpec": "^4.6.2",
+      "resolvedVersion": "4.6.2",
+      "dev": true,
+      "manifest": "package.json",
+      "latestVersion": "7.0.2",
+      "lastReleaseAt": "2026-07-08T15:55:18.431Z",
+      "maintainersCount": 7,
+      "status": "active",
+      "flags": {
+        "deprecated": false,
+        "archived": false,
+        "stale": false,
+        "bus_factor_risk": false,
+        "unresponsive": false,
+        "vulnerable": false,
+        "outdated": true
+      },
+      "cves": [],
+      "bumpType": "major",
+      "recommendedAction": "evaluate-major-bump"
+    }
+  ],
+  "githubActions": [
+    {
+      "workflow": ".github/workflows/commitlint.yml",
+      "action": "actions/checkout",
+      "ref": "de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+      "isPinnedSha": true
+    },
+    {
+      "workflow": ".github/workflows/commitlint.yml",
+      "action": "actions/setup-node",
+      "ref": "6044e13b5dc448c55e2357c09f80417699197238",
+      "isPinnedSha": true
+    },
+    {
+      "workflow": ".github/workflows/lights-on-events.yml",
+      "action": "actions/checkout",
+      "ref": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "isPinnedSha": true
+    },
+    {
+      "workflow": ".github/workflows/lights-on-events.yml",
+      "action": "actions/setup-node",
+      "ref": "949feb2413d6458794dcd2491c4babbbce0c15c1",
+      "isPinnedSha": true
+    },
+    {
+      "workflow": ".github/workflows/lights-on-pr.yml",
+      "action": "actions/checkout",
+      "ref": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "isPinnedSha": true
+    },
+    {
+      "workflow": ".github/workflows/lights-on-pr.yml",
+      "action": "actions/setup-node",
+      "ref": "949feb2413d6458794dcd2491c4babbbce0c15c1",
+      "isPinnedSha": true
+    },
+    {
+      "workflow": ".github/workflows/lights-on-release.yml",
+      "action": "actions/checkout",
+      "ref": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "isPinnedSha": true
+    },
+    {
+      "workflow": ".github/workflows/lights-on-release.yml",
+      "action": "actions/setup-node",
+      "ref": "949feb2413d6458794dcd2491c4babbbce0c15c1",
+      "isPinnedSha": true
+    },
+    {
+      "workflow": ".github/workflows/lights-on-schedule.yml",
+      "action": "actions/checkout",
+      "ref": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "isPinnedSha": true
+    },
+    {
+      "workflow": ".github/workflows/lights-on-schedule.yml",
+      "action": "actions/setup-node",
+      "ref": "949feb2413d6458794dcd2491c4babbbce0c15c1",
+      "isPinnedSha": true
+    },
+    {
+      "workflow": ".github/workflows/lights-on-schedule.yml",
+      "action": "actions/cache",
+      "ref": "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+      "isPinnedSha": true
+    },
+    {
+      "workflow": ".github/workflows/prepare-release.yml",
+      "action": "actions/checkout",
+      "ref": "de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+      "isPinnedSha": true
+    },
+    {
+      "workflow": ".github/workflows/prepare-release.yml",
+      "action": "actions/setup-node",
+      "ref": "6044e13b5dc448c55e2357c09f80417699197238",
+      "isPinnedSha": true
+    },
+    {
+      "workflow": ".github/workflows/prepare-release.yml",
+      "action": "peter-evans/create-pull-request",
+      "ref": "c0f553fe549906ede9cf27b5156039d195d2ece0",
+      "isPinnedSha": true
+    },
+    {
+      "workflow": ".github/workflows/release.yml",
+      "action": "actions/checkout",
+      "ref": "de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+      "isPinnedSha": true
+    },
+    {
+      "workflow": ".github/workflows/release.yml",
+      "action": "actions/setup-node",
+      "ref": "6044e13b5dc448c55e2357c09f80417699197238",
+      "isPinnedSha": true
+    },
+    {
+      "workflow": ".github/workflows/release.yml",
+      "action": "actions/setup-python",
+      "ref": "a309ff8b426b58ec0e2a45f0f869d46889d02405",
+      "isPinnedSha": true
+    },
+    {
+      "workflow": ".github/workflows/release.yml",
+      "action": "aws-actions/configure-aws-credentials",
+      "ref": "8df5847569e6427dd6c4fb1cf565c83acfa8afa7",
+      "isPinnedSha": true
+    },
+    {
+      "workflow": ".github/workflows/sca-scan.yml",
+      "action": "auth0/devsecops-tooling/.github/workflows/sca-scan.yml",
+      "ref": "5246a8b59100e3eea284ce4f2e2a51b51e237380",
+      "isPinnedSha": true
+    },
+    {
+      "workflow": ".github/workflows/test.yml",
+      "action": "actions/checkout",
+      "ref": "de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+      "isPinnedSha": true
+    },
+    {
+      "workflow": ".github/workflows/test.yml",
+      "action": "actions/setup-node",
+      "ref": "6044e13b5dc448c55e2357c09f80417699197238",
+      "isPinnedSha": true
+    },
+    {
+      "workflow": ".github/actions/lights-on-agent/action.yml",
+      "action": "actions/setup-node",
+      "ref": "949feb2413d6458794dcd2491c4babbbce0c15c1",
+      "isPinnedSha": true
+    },
+    {
+      "workflow": ".github/actions/lights-on-agent/action.yml",
+      "action": "actions/cache",
+      "ref": "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+      "isPinnedSha": true
+    }
+  ],
+  "summary": {
+    "total": 22,
+    "vulnerable": 1,
+    "needsMigration": 0,
+    "outdatedPatchMinor": 3,
+    "outdatedMajor": 15,
+    "unpinnedActions": 0
+  }
+}
