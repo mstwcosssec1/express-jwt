@@ -45,7 +45,11 @@ autonomy:
   # Empty means review-only until configured; a lone successful workflow is not sufficient.
   # Example: [{ context: "build", app_id: 15368 }]
   # For a legacy commit status use app_id: null.
-  required_checks: []
+  required_checks:
+    - { context: "commitlint", app_id: 15368 }
+    - { context: "test (20)", app_id: 15368 }
+    - { context: "test (22)", app_id: 15368 }
+    - { context: "test (24)", app_id: 15368 }
   require_independent_agent_review: true
 
 policies:
