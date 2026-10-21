@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync as nativeExecFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { literalPublicationBody, plainPublicationText, commitPublicationText, conciseCommitText } from './publication-text.mjs';
+import { markdownPublicationBody, plainPublicationText, commitPublicationText, conciseCommitText } from './publication-text.mjs';
 
 export function githubEnvironment(env = process.env) {
   if (env.GITHUB_SERVER_URL && env.GITHUB_SERVER_URL.replace(/\/$/, '') !== 'https://github.com') {
@@ -118,7 +118,7 @@ export function runGitHub(args, options = {}, execFileImpl = nativeExecFileSync)
         const fromFile = prepared[i].endsWith('-file');
         if (prepared[i + 1] === undefined || (fromFile && prepared[i + 1] === '-')) throw new Error('A publication body must be supplied explicitly.');
         const text = fromFile ? fs.readFileSync(path.resolve(options.cwd || process.cwd(), prepared[i + 1]), 'utf8') : prepared[i + 1];
-        let rendered = prepared[0] === 'pr' && prepared[1] === 'merge' ? commitPublicationText(text) : literalPublicationBody(text);
+        let rendered = prepared[0] === 'pr' && prepared[1] === 'merge' ? commitPublicationText(text) : markdownPublicationBody(text);
         if (closesIssue !== undefined) {
           if (prepared[0] !== 'pr' || prepared[1] !== 'create' || !Number.isSafeInteger(closesIssue) || closesIssue <= 0) {
             throw new Error('Invalid trusted local issue-closing request.');
@@ -206,7 +206,7 @@ export function submitCommitReview({ prNumber, headSha, verdict, body, env = pro
   // GitHub disallows approving one's own PR. A comment records the SHA-bound
   // assessment without pretending GitHub accepted a formal approval.
   if (current.user?.login === 'github-actions[bot]') event = 'COMMENT';
-  const payload = { commit_id: headSha, event, body: literalPublicationBody(body) };
+  const payload = { commit_id: headSha, event, body: markdownPublicationBody(body) };
   const result = JSON.parse(execFileImpl('gh', ['api', `repos/${repo}/pulls/${prNumber}/reviews`,
     '--hostname', 'github.com', '--method', 'POST', '--input', '-'],
   { env: boundEnv, encoding: 'utf8', input: JSON.stringify(payload) }));

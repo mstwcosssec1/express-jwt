@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from './github-io.mjs';
-import { literalPublicationBody, plainPublicationText } from './publication-text.mjs';
+import { markdownPublicationBody, plainPublicationText } from './publication-text.mjs';
 import fs from 'node:fs';
 import { assertWriteTargetIsInstalledRepo } from './sync-upstream.mjs';
 import { ensureLabels } from './ensure-labels.mjs';
@@ -16,7 +16,7 @@ function publishPrOperation({ repo = process.env.GITHUB_REPOSITORY,
   }
   title = plainPublicationText(title);
   // Apply this even with an injected executor: no caller may bypass body handling.
-  body = literalPublicationBody(bodyFile ? fs.readFileSync(bodyFile, 'utf8') : body);
+  body = markdownPublicationBody(bodyFile ? fs.readFileSync(bodyFile, 'utf8') : body);
   ensureLabels({ repo: target, installedRepo, labels, execFileImpl, env });
   const findExisting = () => {
     const items = JSON.parse(execFileImpl('gh', ['pr', 'list', '--repo', target,

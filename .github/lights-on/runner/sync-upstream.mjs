@@ -17,7 +17,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from './github-io.mjs';
-import { literalPublicationBody } from './publication-text.mjs';
+import { markdownPublicationBody } from './publication-text.mjs';
 import { fileURLToPath } from 'node:url';
 
 import { loadConfig, sanitizeGitHubOutputValue } from './load-config.mjs';
@@ -243,21 +243,21 @@ export function validateCommandRepoIsolation(
 
 /**
  * Format a reference for display. The final publisher must still render the
- * complete body as literal text to prevent cross-repository backlinks.
+ * complete body through the safe Markdown renderer to keep references inactive.
  */
 export function formatSafeUpstreamRef(upstreamRepo, number) {
   const norm = normalizeRepoFullName(upstreamRepo) || String(upstreamRepo || '').trim();
   return `\`${norm}#${Number(number)}\``;
 }
 
-/** Legacy helper name: preserve external content as literal Markdown, not parsed links. */
+/** Legacy helper name: preserve supported formatting without active references. */
 export function neutralizeCrossRepoAutoLinks(
   text,
   upstreamRepo,
   { installedRepo = process.env.GITHUB_REPOSITORY || '' } = {}
 ) {
   if (!text || typeof text !== 'string') return '';
-  return literalPublicationBody(text);
+  return markdownPublicationBody(text);
 }
 
 async function fetchGitHubApiGet(endpointPath, { token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN || '', fetchImpl = globalThis.fetch } = {}) {

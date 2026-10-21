@@ -182,7 +182,7 @@ export function assemblePrompt({
       ? `- Upstream Reference Repository (STRICTLY READ-ONLY): \`${upstreamRepo}\``
       : '- Upstream Reference Repository (if any): STRICTLY READ-ONLY.',
     '- NEVER push, open PRs, create issues, post comments, or mutate state on any repository other than the Installed Repository.',
-    '- Reference upstream items only as data. The trusted publication boundary renders bodies literally and neutralizes reference syntax in titles/commit messages; do not try to create active cross-repository links or mentions.'
+    '- Reference upstream items only as data. The trusted publication boundary renders restricted Markdown with inactive links and references, and neutralizes titles/commit messages separately; do not try to create active cross-repository links or mentions.'
   ];
   sections.push(isolationLines.join('\n'));
 
