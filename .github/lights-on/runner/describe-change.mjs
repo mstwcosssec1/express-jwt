@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
-import { commitPublicationText, literalPublicationBody, plainPublicationText } from './publication-text.mjs';
+import { commitPublicationText, conciseCommitText, literalPublicationBody, plainPublicationText } from './publication-text.mjs';
 
 export function describeChange({ result, files = result?.files_changed || [], validation,
   notes = [], env = process.env } = {}) {
@@ -64,6 +64,26 @@ export function describeChange({ result, files = result?.files_changed || [], va
   return description;
 }
 
+export function describeCommit({ result, files = result?.files_changed || [], validation } = {}) {
+  const summary = result?.summary || result?.prTitle || result?.reason;
+  if (typeof summary !== 'string' || !summary.trim()) throw new Error('A commit description requires a nonempty summary.');
+  const paragraphs = [conciseCommitText(summary, 350)];
+  if (typeof result.details?.rationale === 'string' && result.details.rationale.trim()) {
+    paragraphs.push(conciseCommitText(result.details.rationale, 200));
+  }
+  if (files.length) {
+    const names = [...new Set(files)];
+    paragraphs.push(conciseCommitText(`Files: ${names.slice(0, 3).join(', ')}${names.length > 3 ? ` (+${names.length - 3} more)` : ''}`, 180));
+  }
+  const checks = [];
+  if (validation) checks.push(`Local validation: ${validation.status}.`);
+  if (result.dependency_validation) checks.push(`Dependency validation: ${result.dependency_validation.status}.`);
+  paragraphs.push(checks.join(' ') || 'Independent validation was not recorded by the publisher.');
+  if (result.hold) paragraphs.push('Maintainer review is required.');
+  paragraphs.push('See the PR description for full details and evidence.');
+  return commitPublicationText(paragraphs.join('\n\n'));
+}
+
 export function writeChangeDescription({ resultFile, output, commitOutput, title,
   repoRoot = process.cwd(), env = process.env, execFileImpl = execFileSync } = {}) {
   const result = JSON.parse(fs.readFileSync(resultFile, 'utf8'));
@@ -74,7 +94,7 @@ export function writeChangeDescription({ resultFile, output, commitOutput, title
   if (!files.length) throw new Error('No staged changes to describe.');
   const body = describeChange({ result, files, env });
   fs.writeFileSync(output, body, 'utf8');
-  fs.writeFileSync(commitOutput, `${plainPublicationText(title)}\n\n${commitPublicationText(body)}\n`, 'utf8');
+  fs.writeFileSync(commitOutput, `${plainPublicationText(title)}\n\n${describeCommit({ result, files })}\n`, 'utf8');
   return { body, files };
 }
 

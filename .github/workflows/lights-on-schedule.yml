@@ -387,7 +387,7 @@ jobs:
           import fs from 'node:fs';
           import { execFileSync } from './.github/lights-on/runner/github-io.mjs';
           import { plainPublicationText } from './.github/lights-on/runner/publication-text.mjs';
-          import { describeChange } from './.github/lights-on/runner/describe-change.mjs';
+          import { describeChange, describeCommit } from './.github/lights-on/runner/describe-change.mjs';
           import { sanitizeBranchName } from './.github/lights-on/runner/state-store.mjs';
           import { publishPr } from './.github/lights-on/runner/publish-pr.mjs';
           import { reportWorkflowEvent } from './.github/lights-on/runner/workflow-report.mjs';
@@ -419,7 +419,7 @@ jobs:
             execFileSync('git', ['config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com'], { stdio: 'inherit' });
             execFileSync('git', ['checkout', '-B', branch], { stdio: 'inherit' });
             execFileSync('git', ['add', '-A'], { stdio: 'inherit' });
-            execFileSync('git', ['commit', '-m', title, '-m', body], { stdio: 'inherit' });
+            execFileSync('git', ['commit', '-m', title, '-m', describeCommit({ result })], { stdio: 'inherit' });
             execFileSync('git', ['push', '-u', 'origin', branch, '--force'], { stdio: 'inherit' });
 
             fs.writeFileSync('/tmp/lights-on-issue-fix-pr.md', body, 'utf8');
@@ -448,6 +448,7 @@ jobs:
           import fs from 'node:fs';
           import { execFileSync } from './.github/lights-on/runner/github-io.mjs';
           import { prepareRelease } from './.github/lights-on/runner/prepare-release.mjs';
+          import { describeCommit } from './.github/lights-on/runner/describe-change.mjs';
           import { sanitizeBranchName } from './.github/lights-on/runner/state-store.mjs';
           import { publishPr } from './.github/lights-on/runner/publish-pr.mjs';
           import { reportWorkflowEvent } from './.github/lights-on/runner/workflow-report.mjs';
@@ -475,7 +476,7 @@ jobs:
           } else {
             execFileSync('git', ['add', '--', 'CHANGELOG.md'], { stdio: 'inherit' });
           }
-          execFileSync('git', ['commit', '-m', res.prTitle, '-m', res.prBody], { stdio: 'inherit' });
+          execFileSync('git', ['commit', '-m', res.prTitle, '-m', describeCommit({ result: res, files: res.updatedFiles })], { stdio: 'inherit' });
           execFileSync('git', ['push', '-u', 'origin', branch, '--force'], { stdio: 'inherit' });
 
           fs.writeFileSync('/tmp/lights-on-release-pr.md', res.prBody, 'utf8');

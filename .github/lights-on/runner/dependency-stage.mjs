@@ -10,7 +10,7 @@ import { ensureLabels } from './ensure-labels.mjs';
 import { publishPr } from './publish-pr.mjs';
 import { selectDependencyWork, dependencyFileHash } from './dependency-work.mjs';
 import { reportWorkflowEvent, githubItemUrl } from './workflow-report.mjs';
-import { describeChange } from './describe-change.mjs';
+import { describeChange, describeCommit } from './describe-change.mjs';
 
 function githubSnapshot(repo, execFileImpl, env) {
   const api = (endpoint) => {
@@ -76,7 +76,7 @@ export function publishDependencyStage({ selection, result, repoRoot = process.c
     run('git', ['checkout', '-B', selection.branch]);
     run('git', ['add', '--', ...changed]);
     const title = `chore(deps): ${selection.task === 'dependency-updater' ? 'update' : 'migrate'} ${selection.dependency.name}`;
-    run('git', ['commit', '-m', title, '-m', description]);
+    run('git', ['commit', '-m', title, '-m', describeCommit({ result, files: changed })]);
     run('git', ['push', '-u', 'origin', selection.branch, '--force']);
     const published = publishPr({ repo, installedRepo: repo, head: selection.branch, base, title, body,
       labels: ['lights-on:dependencies'], execFileImpl: (cmd, args, opts) => run(cmd, args, opts), env });

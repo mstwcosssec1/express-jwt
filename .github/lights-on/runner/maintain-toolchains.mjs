@@ -7,6 +7,7 @@ import { loadConfig } from './load-config.mjs';
 import { publishPr } from './publish-pr.mjs';
 import { assertWriteTargetIsInstalledRepo, neutralizeCrossRepoAutoLinks } from './sync-upstream.mjs';
 import { reportWorkflowEvent } from './workflow-report.mjs';
+import { describeCommit } from './describe-change.mjs';
 
 export const NODE_SCHEDULE_URL = 'https://raw.githubusercontent.com/nodejs/Release/main/schedule.json';
 const hash = (text) => crypto.createHash('sha256').update(text).digest('hex');
@@ -305,7 +306,11 @@ export async function maintainToolchains({ repoRoot = process.cwd(), config = lo
     for (const change of plan.changes) fs.writeFileSync(safePath(path.resolve(repoRoot), change.file), change.content);
     run('git', ['add', '--', ...plan.changes.map((change) => change.file)]);
     run('git', ['-c', 'user.name=github-actions[bot]', '-c', 'user.email=41898282+github-actions[bot]@users.noreply.github.com',
-      'commit', '-m', title, '-m', body]);
+      'commit', '-m', title, '-m', describeCommit({
+        result: { summary: `Maintain Node runtimes using the ${plan.policy} lifecycle policy.`,
+          details: { rationale: plan.changes.flatMap((change) => change.reasons).join(' ') }, hold: true },
+        files: plan.changes.map((change) => change.file)
+      })]);
     run('git', ['push', '-u', 'origin', branch, '--force']);
   }
   const pr = publishPr({ repo, installedRepo: repo, head: branch, base, title, body,

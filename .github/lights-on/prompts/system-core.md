@@ -130,3 +130,6 @@ precedence over the generic maintenance examples below.
 - Put additional rationale and source references in `details.rationale` and
   `details.citations`. Report tests as unrun when they were not run; model-assessed
   gates are not independent CI evidence. Do not claim a PR was published by the agent.
+- Keep `pr_title` within 72 characters and make `summary` one or two short
+  sentences about the change and its reason. Put longer explanations, command
+  output and run metadata in `pr_body`, not in the commit summary.

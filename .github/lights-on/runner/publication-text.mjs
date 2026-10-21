@@ -27,5 +27,32 @@ export function plainPublicationText(value) {
 export function commitPublicationText(value) {
   const text = String(value ?? '').replace(/\r\n/g, '\n');
   const wrapped = text.match(/^(`{3,})text\n([\s\S]*)\n\1$/);
-  return (wrapped ? wrapped[2] : text).split('\n').map(plainPublicationText).join('\n').trim();
+  return (wrapped ? wrapped[2] : text).split('\n').flatMap((line) => {
+    let remaining = plainPublicationText(line);
+    const lines = [];
+    while (remaining.length > 72) {
+      let split = remaining.lastIndexOf(' ', 72);
+      if (split <= 0) {
+        split = 72;
+        if (/[\uD800-\uDBFF]/.test(remaining[split - 1]) && /[\uDC00-\uDFFF]/.test(remaining[split])) split--;
+      }
+      lines.push(remaining.slice(0, split));
+      remaining = remaining.slice(split).trimStart();
+    }
+    lines.push(remaining);
+    return lines;
+  }).join('\n').trim();
+}
+
+export function conciseCommitText(value, limit = 600) {
+  const text = String(value ?? '').replace(/\r\n/g, '\n');
+  const wrapped = text.match(/^(`{3,})text\n([\s\S]*)\n\1$/);
+  const plain = (wrapped ? wrapped[2] : text).split('\n').map(plainPublicationText).join('\n').trim();
+  if (plain.length <= limit) return commitPublicationText(plain);
+  let split = plain.lastIndexOf(' ', limit - 3);
+  if (split < Math.floor(limit / 2)) {
+    split = limit - 3;
+    if (/[\uD800-\uDBFF]/.test(plain[split - 1]) && /[\uDC00-\uDFFF]/.test(plain[split])) split--;
+  }
+  return commitPublicationText(`${plain.slice(0, split).trimEnd()}...`);
 }

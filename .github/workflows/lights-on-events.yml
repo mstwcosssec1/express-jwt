@@ -207,7 +207,7 @@ jobs:
           import fs from 'node:fs';
           import { execFileSync } from './.github/lights-on/runner/github-io.mjs';
           import { plainPublicationText } from './.github/lights-on/runner/publication-text.mjs';
-          import { describeChange } from './.github/lights-on/runner/describe-change.mjs';
+          import { describeChange, describeCommit } from './.github/lights-on/runner/describe-change.mjs';
           import * as stateStore from './.github/lights-on/runner/state-store.mjs';
           import { publishPr } from './.github/lights-on/runner/publish-pr.mjs';
           import { reportWorkflowEvent, githubItemUrl } from './.github/lights-on/runner/workflow-report.mjs';
@@ -298,7 +298,7 @@ jobs:
             execFileSync('git', ['config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com'], { stdio: 'inherit' });
             execFileSync('git', ['checkout', '-B', branchName], { stdio: 'inherit' });
             execFileSync('git', ['add', '-A'], { stdio: 'inherit' });
-            execFileSync('git', ['commit', '-m', prTitle, '-m', rawPrBody], { stdio: 'inherit' });
+            execFileSync('git', ['commit', '-m', prTitle, '-m', describeCommit({ result })], { stdio: 'inherit' });
             execFileSync('git', ['push', '-u', 'origin', branchName, '--force'], { stdio: 'inherit' });
 
             fs.writeFileSync('/tmp/lights-on-pr-body.md', prBody, 'utf8');
