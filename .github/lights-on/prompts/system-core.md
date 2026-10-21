@@ -123,3 +123,10 @@ precedence over the generic maintenance examples below.
 - Use fields supported by finish_task. Put additional evidence/citations in `details`; do not fabricate missing data.
 - If any of the 4 gates in `gate_results` is `"FAIL"`, or if `breaking_api_change` is `true`, `verdict` **must not** be `"APPROVE"`.
 - Return data, not XML/native tool syntax or a shell command that writes a result file.
+- For proposed changes, make `summary` describe what changed and why. Use `pr_body`
+  for the specific before/after behavior, affected locations, source/test citations,
+  validation actually attempted and remaining limitations. Do not substitute
+  "automated maintenance" or claim recurring user questions without supplied evidence.
+- Put additional rationale and source references in `details.rationale` and
+  `details.citations`. Report tests as unrun when they were not run; model-assessed
+  gates are not independent CI evidence. Do not claim a PR was published by the agent.

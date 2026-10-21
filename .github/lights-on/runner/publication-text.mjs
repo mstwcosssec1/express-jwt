@@ -23,3 +23,9 @@ export function plainPublicationText(value) {
     .replace(/\//g, ' / ').replace(/#/g, ' number ').replace(/@/g, ' at ')
     .replace(/&/g, ' and ').replace(/\s+/g, ' ').trim();
 }
+
+export function commitPublicationText(value) {
+  const text = String(value ?? '').replace(/\r\n/g, '\n');
+  const wrapped = text.match(/^(`{3,})text\n([\s\S]*)\n\1$/);
+  return (wrapped ? wrapped[2] : text).split('\n').map(plainPublicationText).join('\n').trim();
+}

@@ -305,7 +305,7 @@ export async function maintainToolchains({ repoRoot = process.cwd(), config = lo
     for (const change of plan.changes) fs.writeFileSync(safePath(path.resolve(repoRoot), change.file), change.content);
     run('git', ['add', '--', ...plan.changes.map((change) => change.file)]);
     run('git', ['-c', 'user.name=github-actions[bot]', '-c', 'user.email=41898282+github-actions[bot]@users.noreply.github.com',
-      'commit', '-m', title]);
+      'commit', '-m', title, '-m', body]);
     run('git', ['push', '-u', 'origin', branch, '--force']);
   }
   const pr = publishPr({ repo, installedRepo: repo, head: branch, base, title, body,

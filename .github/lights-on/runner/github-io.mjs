@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync as nativeExecFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { literalPublicationBody, plainPublicationText } from './publication-text.mjs';
+import { literalPublicationBody, plainPublicationText, commitPublicationText } from './publication-text.mjs';
 
 export function githubEnvironment(env = process.env) {
   if (env.GITHUB_SERVER_URL && env.GITHUB_SERVER_URL.replace(/\/$/, '') !== 'https://github.com') {
@@ -81,7 +81,7 @@ export function prepareGitHubArgs(args, env = process.env) {
   if (prepared[0] === 'pr' && prepared[1] === 'merge') {
     if (prepared.includes('--rebase')) throw new Error('Rebase merging cannot sanitize rewritten commit messages; use squash or a reviewed manual merge.');
     if (!prepared.includes('--subject')) prepared.push('--subject', `Merge PR ${prepared[2]}`);
-    if (!prepared.includes('--body')) prepared.push('--body', 'Merged by Lights On after review and CI verification.');
+    if (!prepared.includes('--body') && !prepared.includes('--body-file')) prepared.push('--body', 'Merged by Lights On after review and CI verification.');
   }
   return prepared;
 }
@@ -94,6 +94,22 @@ export function runGitHub(args, options = {}, execFileImpl = nativeExecFileSync)
   const closesIssue = execOptions.lightsOnClosesIssue;
   delete execOptions.lightsOnClosesIssue;
   try {
+    if (prepared[0] === 'pr' && prepared[1] === 'merge' &&
+        (!args.includes('--subject') || !args.includes('--body') && !args.includes('--body-file'))) {
+      const current = JSON.parse(runGitHub(['api', `repos/${installedRepository(env)}/pulls/${prepared[2]}`],
+        { env, encoding: 'utf8' }, execFileImpl));
+      const expectedIndex = prepared.indexOf('--match-head-commit');
+      if (current.state !== 'open' || current.merged || !/^[a-f0-9]{40}$/i.test(current.head?.sha || '') ||
+          expectedIndex < 0 || current.head.sha !== prepared[expectedIndex + 1] ||
+          typeof current.title !== 'string' || !current.title.trim() ||
+          current.body !== null && typeof current.body !== 'string') {
+        throw new Error('Cannot preserve merge description: PR identity, content or reviewed head changed.');
+      }
+      if (!args.includes('--subject')) prepared[prepared.indexOf('--subject') + 1] = current.title;
+      if (!args.includes('--body') && !args.includes('--body-file')) {
+        prepared[prepared.indexOf('--body') + 1] = `${commitPublicationText(current.body || 'No PR description was supplied.')}\n\nReviewed head: ${current.head.sha}`;
+      }
+    }
     for (let i = 0; i < prepared.length; i++) {
       if (['--title', '--subject'].includes(prepared[i])) {
         prepared[i + 1] = plainPublicationText(prepared[i + 1]); i++;
@@ -101,7 +117,7 @@ export function runGitHub(args, options = {}, execFileImpl = nativeExecFileSync)
         const fromFile = prepared[i].endsWith('-file');
         if (prepared[i + 1] === undefined || (fromFile && prepared[i + 1] === '-')) throw new Error('A publication body must be supplied explicitly.');
         const text = fromFile ? fs.readFileSync(path.resolve(options.cwd || process.cwd(), prepared[i + 1]), 'utf8') : prepared[i + 1];
-        let rendered = prepared[0] === 'pr' && prepared[1] === 'merge' ? plainPublicationText(text) : literalPublicationBody(text);
+        let rendered = prepared[0] === 'pr' && prepared[1] === 'merge' ? commitPublicationText(text) : literalPublicationBody(text);
         if (closesIssue !== undefined) {
           if (prepared[0] !== 'pr' || prepared[1] !== 'create' || !Number.isSafeInteger(closesIssue) || closesIssue <= 0) {
             throw new Error('Invalid trusted local issue-closing request.');
@@ -130,8 +146,8 @@ export function execFileSync(command, args, options = {}) {
   if (command === 'git' && args.includes('commit')) {
     const safe = [...args];
     for (let i = 0; i < safe.length; i++) {
-      if (safe[i] === '-m' || safe[i] === '--message') safe[++i] = plainPublicationText(safe[i]);
-      else if (safe[i].startsWith('--message=')) safe[i] = `--message=${plainPublicationText(safe[i].slice(10))}`;
+      if (safe[i] === '-m' || safe[i] === '--message') safe[++i] = commitPublicationText(safe[i]);
+      else if (safe[i].startsWith('--message=')) safe[i] = `--message=${commitPublicationText(safe[i].slice(10))}`;
     }
     return nativeExecFileSync(command, safe, options);
   }

@@ -52,7 +52,9 @@ When you confirm concrete inaccuracies, broken relative links, outdated signatur
 2. **Validation**:
    - If the repository has markdown linters, doc-tests, or build checks, run them to confirm nothing is broken.
 3. **PR Metadata**:
-   - Set `action_taken: "opened_pr"`, `risk_level: "none"`, `breaking_api_change: false`.
+   - Set `action_taken: "docs_updated"` and `breaking_api_change: false`; assess
+     `risk_level` using the supported tool values. The controller, not this agent,
+     decides whether to publish a PR.
    - In `pr_title` and `pr_body`, list each documentation fix with:
      - The inaccurate or confusing documentation location (`file:line`)
      - The ground-truth source code or test citation (`code_file:line`) proving the actual behavior
