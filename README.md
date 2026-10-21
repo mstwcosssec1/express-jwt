@@ -267,6 +267,14 @@ app.use(
 );
 ```
 
+### CORS preflight requests
+
+An `OPTIONS` request whose `Access-Control-Request-Headers` header lists `authorization` (case-insensitive, comma-separated) skips token verification and is passed to the next middleware. Make sure your `OPTIONS` handlers do not expose protected data.
+
+### Unverified token in the `secret` callback
+
+The `token` passed to a `secret` function is decoded but not yet verified, so treat its `header` and `payload` fields (such as `kid` or `iss`) as untrusted input.
+
 ## Typescript
 
 A `Request` type is provided from `express-jwt`, which extends `express.Request` with the `auth` property. It could be aliased, like how `JWTRequest` is below.
