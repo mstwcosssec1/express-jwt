@@ -104,15 +104,17 @@ export function validateReleaseArtifacts({ directory, version, ecosystem, repoRo
   return files;
 }
 
-export function registryEnvironment(ecosystem, env, home) {
+export function registryEnvironment(ecosystem, env, home, { provenance = true } = {}) {
   const clean = { PATH: env.PATH, SystemRoot: env.SystemRoot, HOME: home, USERPROFILE: home,
     DOTNET_CLI_HOME: home, DOTNET_NOLOGO: 'true', CI: 'true' };
   if (ecosystem === 'npm') {
     if (env.REGISTRY_TOKEN) clean.NODE_AUTH_TOKEN = env.REGISTRY_TOKEN;
-    for (const key of ['ACTIONS_ID_TOKEN_REQUEST_URL', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN',
-      'GITHUB_ACTIONS', 'GITHUB_REPOSITORY', 'GITHUB_REF', 'GITHUB_SHA', 'GITHUB_RUN_ID',
-      'GITHUB_RUN_ATTEMPT', 'GITHUB_WORKFLOW_REF', 'GITHUB_WORKFLOW_SHA',
-      'ACTIONS_RESULTS_URL', 'RUNNER_ENVIRONMENT']) if (env[key]) clean[key] = env[key];
+    if (!env.REGISTRY_TOKEN || provenance) {
+      for (const key of ['ACTIONS_ID_TOKEN_REQUEST_URL', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN',
+        'GITHUB_ACTIONS', 'GITHUB_REPOSITORY', 'GITHUB_REF', 'GITHUB_SHA', 'GITHUB_RUN_ID',
+        'GITHUB_RUN_ATTEMPT', 'GITHUB_WORKFLOW_REF', 'GITHUB_WORKFLOW_SHA',
+        'ACTIONS_RESULTS_URL', 'RUNNER_ENVIRONMENT']) if (env[key]) clean[key] = env[key];
+    }
   }
   if (ecosystem === 'rubygems') clean.GEM_HOST_API_KEY = env.REGISTRY_TOKEN;
   return clean;
@@ -127,13 +129,14 @@ export async function uploadReleaseArtifacts({ repoRoot, directory, version, eco
   if (ecosystem === 'npm' && !env.REGISTRY_TOKEN && !env.ACTIONS_ID_TOKEN_REQUEST_TOKEN) throw new Error('Missing npm publishing identity.');
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lights-on-publish-'));
   try {
-    const cleanEnv = registryEnvironment(ecosystem, env, home);
+    const provenance = ecosystem === 'npm' && loadConfig({ repoRoot, env: {} }).release.provenance !== false;
+    const cleanEnv = registryEnvironment(ecosystem, env, home, { provenance });
     const run = (cmd, args) => execFileImpl(cmd, args, { cwd: home, env: cleanEnv, stdio: 'pipe' });
     if (ecosystem === 'npm') {
       fs.writeFileSync(path.join(home, '.npmrc'), env.REGISTRY_TOKEN ? '//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}\n' : '');
       for (const file of files) run('npm', ['publish', file, '--ignore-scripts', '--strict-ssl=true', '--access', 'public',
         '--registry', 'https://registry.npmjs.org', '--userconfig', path.join(home, '.npmrc'),
-        ...(env.ACTIONS_ID_TOKEN_REQUEST_TOKEN ? ['--provenance'] : [])]);
+        ...(provenance && cleanEnv.ACTIONS_ID_TOKEN_REQUEST_TOKEN ? ['--provenance'] : [])]);
     } else if (ecosystem === 'nuget') {
       fs.writeFileSync(path.join(home, 'NuGet.Config'), '<configuration><packageSources><clear /></packageSources></configuration>');
       for (const file of files) run('dotnet', ['nuget', 'push', file, '--source',

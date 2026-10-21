@@ -2,9 +2,8 @@
 /**
  * Lights On — alpha-omega-security/threat-model Integration
  *
- * Inspects and validates repository THREAT_MODEL.md files against the canonical
- * §1.1–§1.19 schema from https://github.com/alpha-omega-security/threat-model
- * and installs the upstream threat-model skills into `.claude/skills/` and `.github/skills/`.
+ * Checks numbered section presence, not the truth of security claims.
+ * Skill installation can populate a cache without changing the repository.
  */
 
 import fs from 'node:fs';
@@ -392,7 +391,7 @@ if (isMain) {
         sectionKeys: Object.keys(inspection.sections).filter((k) => k !== 'byNumber' && Boolean(inspection.sections[k]))
       };
       console.log(JSON.stringify(summary, null, 2));
-      if (cli.check && !inspection.exists) {
+      if (cli.check && !inspection.valid) {
         process.exit(1);
       }
     }

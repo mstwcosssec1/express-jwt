@@ -4,6 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { PROTECTED_PATH_PATTERNS } from './verify-pr-safety.mjs';
+import { resolveSafePath } from './workspace-path.mjs';
 
 const MAX_BYTES = 100 * 1024 * 1024;
 const MAX_FILES = 10000;
@@ -54,11 +55,7 @@ export function applyCandidate({ candidate, target, baseline, allowThreatModel =
   // Validate the whole change set before touching the trusted checkout.
   for (const name of changes) {
     if (protectedPath(name, allowThreatModel)) throw new Error(`Protected candidate change rejected: ${name}`);
-    let current = path.join(target, ...name.split('/'));
-    while (current !== target) {
-      if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) throw new Error(`Symlink in destination: ${name}`);
-      current = path.dirname(current);
-    }
+    resolveSafePath(name, target);
     const full = path.join(target, ...name.split('/'));
     const original = baseline.get(name);
     if (original && (!fs.existsSync(full) || !fs.lstatSync(full).isFile() ||

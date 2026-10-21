@@ -6,6 +6,7 @@ import { inventory, createAgentSandbox } from './agent-sandbox.mjs';
 import { detectManifestsAndDeps } from './scan-dependencies.mjs';
 import { isOnCooldown, getAttempts } from './state-store.mjs';
 import { PROTECTED_PATH_PATTERNS } from './verify-pr-safety.mjs';
+import { resolveSafePath } from './workspace-path.mjs';
 
 export const DEPENDENCY_TASKS = ['dependency-updater', 'dependency-migration-planner', 'dependency-migrator'];
 const semver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
@@ -20,7 +21,7 @@ function safeFile(root, name) {
       name.split('/').some((part) => !part || part === '..' || part === '.') || /[:\x00-\x1f]/.test(name)) {
     throw new Error('Invalid dependency work path.');
   }
-  return path.join(root, ...name.split('/'));
+  return resolveSafePath(name, root);
 }
 
 function readJson(root, name) {
@@ -48,11 +49,6 @@ export function approvedMigration(config, id) {
   return structuredClone(plan);
 }
 
-function currentDependency(root, dep) {
-  return detectManifestsAndDeps(root).dependencies.find((current) =>
-    current.ecosystem === dep.ecosystem && current.manifest === dep.manifest && current.name === dep.name);
-}
-
 export function selectDependencyWork({ report, repoRoot, openPrs = [], openPlans = [], state = {}, config = {},
   mode = 'updates', planId = '', now = Date.now() }) {
   if (!['updates', 'migration-plan', 'migration'].includes(mode)) throw new Error('Invalid dependency selection mode.');
@@ -74,6 +70,12 @@ export function selectDependencyWork({ report, repoRoot, openPrs = [], openPlans
   const skipped = [];
   const unique = [...new Map(candidates.map((dep) => [dependencyKey(dep), dep])).values()]
     .sort((a, b) => dependencyKey(a).localeCompare(dependencyKey(b)));
+  const currentByKey = new Map();
+  for (const dep of unique.length ? detectManifestsAndDeps(repoRoot).dependencies : []) {
+    const key = dependencyKey(dep);
+    if (!currentByKey.has(key)) currentByKey.set(key, []);
+    currentByKey.get(key).push(dep);
+  }
   for (const dep of unique) {
     const key = dependencyKey(dep);
     const stateKey = mode === 'updates' ? key : `${key}:${mode}:${planId}`;
@@ -89,8 +91,8 @@ export function selectDependencyWork({ report, repoRoot, openPrs = [], openPlans
       skipped.push({ key, reason: 'open-pr-already-modifies-manifest' });
       continue;
     }
-    const current = currentDependency(repoRoot, dep);
-    if (!current || current.versionSpec !== dep.versionSpec || current.resolvedVersion !== dep.resolvedVersion) {
+    if (!currentByKey.get(key)?.some((current) =>
+      current.versionSpec === dep.versionSpec && current.resolvedVersion === dep.resolvedVersion)) {
       blockers.push({ key, reason: 'manifest-changed-since-scan' });
       continue;
     }
@@ -258,7 +260,10 @@ export async function validateDependencyCandidate({ selection, repoRoot, candida
     const expectedFiles = inventory(candidateRoot, { omitLocal: true });
     for (const [name, expected] of expectedFiles) {
       if (!fs.existsSync(safeFile(worker.workspace, name)) ||
-          dependencyFileHash(worker.workspace, name) !== expected.hash) throw new Error(`Validation modified candidate source: ${name}`);
+          dependencyFileHash(worker.workspace, name) !== expected.hash ||
+          (fs.statSync(safeFile(worker.workspace, name)).mode & 0o111) !== (expected.mode & 0o111)) {
+        throw new Error(`Validation modified candidate source: ${name}`);
+      }
     }
     if (selection.task === 'dependency-migrator') {
       const resolution = readJson(worker.workspace, 'dependency-validation.json');

@@ -22,7 +22,7 @@ inputs:
     required: false
     default: ""
   dependency_selection_file:
-    description: "Trusted Step D1 selection for a bounded dependency update or approved migration"
+    description: "Trusted Step D selection for a bounded dependency update or approved migration"
     required: false
     default: ""
   output_file:
@@ -36,7 +36,7 @@ inputs:
 
 outputs:
   status:
-    description: "Execution status (completed, skipped, failed)"
+    description: "Execution status (completed, skipped, blocked, failed); failed exits nonzero"
     value: ${{ steps.run-agent.outputs.status }}
   provider:
     description: "Resolved LLM provider (copilot, claude, codex, openrouter)"
@@ -64,6 +64,7 @@ runs:
       uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
         node-version: "24"
+        package-manager-cache: false
 
     - name: Restore shared Lights On state
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -87,11 +88,16 @@ runs:
       run: |
         docker info > /dev/null
 
-    - name: Install inference-only Copilot CLI
-      if: steps.check-config.outputs.enabled != 'false' && env.COPILOT_GITHUB_TOKEN != ''
+    - name: Prepare locked inference-only Copilot CLI
+      if: steps.check-config.outputs.enabled != 'false' && steps.check-config.outputs.copilot_backend == 'cli' && env.COPILOT_GITHUB_TOKEN != ''
       shell: bash
-      working-directory: ${{ runner.temp }}
-      run: npm install --global --ignore-scripts @github/copilot@1.0.98
+      run: node .github/lights-on/runner/install-copilot-tools.mjs --backend cli --directory "$RUNNER_TEMP/lights-on-copilot-cli"
+
+    - name: Prepare pinned Copilot SDK runtime
+      if: steps.check-config.outputs.enabled != 'false' && steps.check-config.outputs.copilot_backend == 'sdk' && env.COPILOT_GITHUB_TOKEN != ''
+      shell: bash
+      run: |
+        node .github/lights-on/runner/install-copilot-sdk.mjs --directory "$RUNNER_TEMP/lights-on-copilot-sdk"
 
     - name: Install alpha-omega-security/threat-model skills
       if: steps.check-config.outputs.enabled != 'false' && inputs.install_threat_model_skills == 'true'
@@ -114,6 +120,8 @@ runs:
         CHECK_MODEL: ${{ steps.check-config.outputs.model }}
         LIGHTS_ON_UPSTREAM_REPO: ${{ steps.check-config.outputs.upstream_repo }}
         LIGHTS_ON_SANDBOX_IMAGE: ${{ inputs.sandbox_image }}
+        LIGHTS_ON_COPILOT_SDK_DIR: ${{ runner.temp }}/lights-on-copilot-sdk
+        LIGHTS_ON_COPILOT_CLI_DIR: ${{ runner.temp }}/lights-on-copilot-cli
       run: |
         if [ "$CONFIG_ENABLED" = "false" ] || [ "$LIGHTS_ON_ENABLED" = "false" ]; then
           node .github/lights-on/runner/workflow-report.mjs --title "Agent execution skipped" --message "Lights On is disabled; no agent or PR publication was performed."
@@ -143,5 +151,5 @@ runs:
           args+=(--dependency-selection "$INPUT_DEPENDENCY_SELECTION_FILE")
         fi
 
-        node .github/lights-on/runner/run-agent.mjs "${args[@]}"
         echo "result_file=${INPUT_OUTPUT_FILE//[$'\r\n']/}" >> "$GITHUB_OUTPUT"
+        node .github/lights-on/runner/run-agent.mjs "${args[@]}"

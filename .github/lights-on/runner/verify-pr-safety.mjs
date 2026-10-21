@@ -153,6 +153,11 @@ export function evaluatePrSafety({
   const reasons = [];
   const recommendedLabels = new Set();
 
+  if (pr?.draft === true) {
+    allowAutoMerge = false;
+    reasons.push('draft-pr');
+  }
+
   if (metadataInvalid || !hasCompleteFileInventory(pr, changedFiles)) {
     safeToReview = false;
     allowAutoMerge = false;
@@ -231,6 +236,13 @@ export function evaluatePrSafety({
   // 8. Evaluate 4-Gate Review Result when provided
   if (reviewResult && typeof reviewResult === 'object') {
     let reviewGatesPassed = true;
+    if (reviewResult.status !== 'completed' || (reviewResult.dry_run !== undefined && reviewResult.dry_run !== false)) {
+      allowAutoMerge = false;
+      reviewGatesPassed = false;
+      requiresHuman = true;
+      reasons.push('review-not-completed');
+      recommendedLabels.add(LABELS.NEEDS_HUMAN);
+    }
     const verdict = String(reviewResult.verdict || '').toUpperCase();
     if (verdict !== 'APPROVE') {
       allowAutoMerge = false;

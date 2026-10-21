@@ -1,6 +1,6 @@
 # Read-only dependency migration planning
 
-Produce a plan, not a code patch. When a Step D1 selection is present, analyze
+Produce a plan, not a code patch. When a Step D selection is present, analyze
 only that dependency. For a maintainer's migrate-dep request, use the named
 package/issue as the planning scope; if ambiguous, list the clarification needed.
 

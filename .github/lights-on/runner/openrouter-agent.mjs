@@ -1,20 +1,20 @@
 #!/usr/bin/env node
 /**
- * Lights On — Zero-Dependency OpenRouter Autonomous Tool-Calling Agent
- *
- * Implements an OpenAI-compatible function-calling loop against OpenRouter
- * (`https://openrouter.ai/api/v1/chat/completions` or `process.env.OPENROUTER_BASE_URL`)
- * using Node's native `fetch`.
+ * Controller-owned tool loop shared by all providers.
+ * Standalone use calls OpenRouter through Node's native fetch.
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import crypto from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 import { validateCommandRepoIsolation } from './sync-upstream.mjs';
 import { createAgentSandbox } from './agent-sandbox.mjs';
 import { createUsageAccumulator } from './usage.mjs';
+import { resolveSafePath } from './workspace-path.mjs';
+import { matchesToolParameters } from './tool-arguments.mjs';
+export { resolveSafePath } from './workspace-path.mjs';
 
 const DEFAULT_OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const DEFAULT_MODEL = 'anthropic/claude-sonnet-5.5';
@@ -133,52 +133,6 @@ export function resolveOpenRouterEndpoint(baseUrl = process.env.OPENROUTER_BASE_
   return `${trimmed}/chat/completions`;
 }
 
-/**
- * Resolve a target path and verify it stays within workingDir (or allowed temp directory when allowTmp is true).
- * Rejects symlinks, including dangling links, in every target path component.
- */
-export function resolveSafePath(targetPath, workingDir = process.cwd(), { allowTmp = false } = {}) {
-  if (!targetPath || typeof targetPath !== 'string') {
-    throw new Error('Path must be a non-empty string');
-  }
-  const absWorkingDir = fs.realpathSync(path.resolve(workingDir));
-  const lexicalTarget = path.resolve(absWorkingDir, targetPath);
-
-  const normalizedWorking = normalizeForComparison(absWorkingDir);
-  const normalizedTarget = normalizeForComparison(lexicalTarget);
-
-  const isInsideWorkingDir =
-    normalizedTarget === normalizedWorking ||
-    normalizedTarget.startsWith(normalizedWorking + path.sep);
-
-  let isInsideTmp = false;
-  let absTmpDir;
-  if (allowTmp) {
-    absTmpDir = fs.realpathSync(path.resolve(os.tmpdir()));
-    const normalizedOsTmp = normalizeForComparison(absTmpDir);
-    isInsideTmp =
-      normalizedTarget === normalizedOsTmp ||
-      normalizedTarget.startsWith(normalizedOsTmp + path.sep);
-  }
-
-  if (!isInsideWorkingDir && !isInsideTmp) {
-    throw new Error(`Path traversal blocked: "${targetPath}" resolves outside workingDir "${absWorkingDir}"`);
-  }
-
-  const root = isInsideWorkingDir ? absWorkingDir : absTmpDir;
-  let current = root;
-  const parts = path.relative(root, lexicalTarget).split(path.sep).filter(Boolean);
-  for (let index = 0; index < parts.length; index++) {
-    current = path.join(current, parts[index]);
-    const stat = fs.lstatSync(current, { throwIfNoEntry: false });
-    if (!stat) continue;
-    if (stat.isSymbolicLink()) throw new Error(`Symlink path blocked: "${targetPath}"`);
-    if (index < parts.length - 1 && !stat.isDirectory()) throw new Error('Path ancestor is not a directory.');
-    if (!stat.isDirectory() && !stat.isFile()) throw new Error('Special files are not permitted.');
-  }
-  return lexicalTarget;
-}
-
 function readRegularFile(file, maxBytes) {
   const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
   try {
@@ -187,6 +141,40 @@ function readRegularFile(file, maxBytes) {
     const buffer = Buffer.alloc(Math.min(stat.size, maxBytes ?? stat.size));
     return { content: buffer.subarray(0, fs.readSync(fd, buffer, 0, buffer.length, 0)).toString('utf8'), size: stat.size };
   } finally { fs.closeSync(fd); }
+}
+
+function readLineRange(file, start, end) {
+  if (!Number.isSafeInteger(start) || start < 1 ||
+      (end !== Infinity && (!Number.isSafeInteger(end) || end < start))) throw new Error('Invalid 1-based line range.');
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+  const decoder = new StringDecoder('utf8'), buffer = Buffer.alloc(65536), parts = [];
+  let line = 1, bytes = 0, pendingCR = '', truncated = false;
+  const append = (value) => {
+    const encoded = Buffer.from(value);
+    if (bytes + encoded.length > MAX_READ_BYTES) {
+      parts.push(new StringDecoder('utf8').write(encoded.subarray(0, MAX_READ_BYTES - bytes)));
+      truncated = true;
+    } else { parts.push(value); bytes += encoded.length; }
+  };
+  try {
+    if (!fs.fstatSync(fd).isFile()) throw new Error('Only regular files may be read.');
+    while (!truncated && line <= end) {
+      const count = fs.readSync(fd, buffer, 0, buffer.length, null);
+      let text = pendingCR + (count ? decoder.write(buffer.subarray(0, count)) : decoder.end());
+      pendingCR = count && text.endsWith('\r') ? '\r' : '';
+      if (pendingCR) text = text.slice(0, -1);
+      const segments = text.replace(/\r\n/g, '\n').split('\n');
+      for (let i = 0; i < segments.length && !truncated && line <= end; i++) {
+        if (line >= start) append(segments[i]);
+        if (i < segments.length - 1) {
+          if (line >= start && line < end && !truncated) append('\n');
+          line++;
+        }
+      }
+      if (!count) break;
+    }
+  } finally { fs.closeSync(fd); }
+  return { content: parts.join(''), truncated };
 }
 
 function writeWorkspaceFile(file, content, workingDir) {
@@ -210,11 +198,6 @@ function writeWorkspaceFile(file, content, workingDir) {
   } finally {
     if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
   }
-}
-
-function normalizeForComparison(p) {
-  const resolved = path.resolve(p);
-  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
 export const PROTECTED_AGENT_PATH_PATTERNS = [
@@ -253,6 +236,10 @@ export function executeToolCall(toolName, rawArgs, { workingDir = process.cwd(),
     }
   }
   args = args || {};
+  const schema = OPENROUTER_TOOLS.find((tool) => tool.function.name === toolName)?.function.parameters;
+  if (schema && !matchesToolParameters(args, schema)) {
+    return { ok: false, error: `Arguments for ${toolName} must match the tool's required fields and types.` };
+  }
 
   try {
     const isReadOnlyMode = env.LIGHTS_ON_READ_ONLY === 'true' || env.LIGHTS_ON_READ_ONLY === '1';
@@ -268,14 +255,11 @@ export function executeToolCall(toolName, rawArgs, { workingDir = process.cwd(),
           const entries = fs.readdirSync(resolved);
           return { ok: true, type: 'directory', entries };
         }
-        let { content } = readRegularFile(resolved, MAX_READ_BYTES);
-        if (args.start_line !== undefined || args.end_line !== undefined) {
-          const lines = content.split(/\r?\n/);
-          const start = Math.max(1, Number(args.start_line) || 1);
-          const end = args.end_line !== undefined ? Math.min(lines.length, Number(args.end_line)) : lines.length;
-          content = lines.slice(start - 1, end).join('\n');
-        }
-        if (stat.size > MAX_READ_BYTES) content += '\n... [truncated]';
+        const ranged = args.start_line !== undefined || args.end_line !== undefined;
+        let { content, truncated } = ranged
+          ? readLineRange(resolved, args.start_line ?? 1, args.end_line ?? Infinity)
+          : { ...readRegularFile(resolved, MAX_READ_BYTES), truncated: stat.size > MAX_READ_BYTES };
+        if (truncated) content += '\n... [truncated]';
         return { ok: true, path: args.path, content };
       }
 
@@ -405,6 +389,9 @@ export async function runOpenRouterAgent({
   if (typeof fetchImpl !== 'function') {
     throw new Error('A valid fetch implementation is required');
   }
+  if (!Number.isSafeInteger(maxTurns) || maxTurns < 1) throw new Error('maxTurns must be a positive integer.');
+  if (!Number.isSafeInteger(maxTokensPerRun) || maxTokensPerRun <= 0 ||
+      !Number.isFinite(maxCostPerRunUsd) || maxCostPerRunUsd <= 0) throw new Error('Token and cost limits must be positive finite numbers.');
   if (!runCommand) {
     const sandbox = createAgentSandbox({ repoRoot: workingDir, image: env.LIGHTS_ON_SANDBOX_IMAGE || undefined });
     try {
@@ -413,7 +400,7 @@ export async function runOpenRouterAgent({
         maxTurns, maxTokensPerRun, maxCostPerRunUsd, fetchImpl, complete,
         runCommand: (command) => sandbox.run(command), env
       });
-      if (env.LIGHTS_ON_READ_ONLY !== 'true' && env.LIGHTS_ON_READ_ONLY !== '1') {
+      if (result.status === 'completed' && env.LIGHTS_ON_READ_ONLY !== 'true' && env.LIGHTS_ON_READ_ONLY !== '1') {
         result.files_changed = sandbox.apply();
       }
       if (outputPath) fs.writeFileSync(path.resolve(workingDir, outputPath), JSON.stringify(result, null, 2), 'utf8');
@@ -431,15 +418,24 @@ export async function runOpenRouterAgent({
     { role: 'user', content: prompt }
   ];
 
-  let lastAssistantText = '';
   const usage = createUsageAccumulator();
+  let turnsUsed = 0;
+  let stopReason = 'max_turns';
+  const execution = (reason) => ({
+    stop_reason: reason,
+    turns_used: turnsUsed,
+    limits: { max_turns_per_run: maxTurns, max_tokens_per_run: maxTokensPerRun,
+      max_cost_per_run_usd: maxCostPerRunUsd }
+  });
 
   for (let turn = 0; turn < maxTurns; turn++) {
     const used = usage.snapshot();
     if (typeof maxTokensPerRun === 'number' && maxTokensPerRun > 0 && used.known_total_tokens >= maxTokensPerRun) {
+      stopReason = 'max_tokens';
       break;
     }
     if (typeof maxCostPerRunUsd === 'number' && maxCostPerRunUsd > 0 && used.known_cost_usd >= maxCostPerRunUsd) {
+      stopReason = 'max_cost';
       break;
     }
 
@@ -448,6 +444,7 @@ export async function runOpenRouterAgent({
     };
     let data;
     try {
+      turnsUsed++;
       if (complete) {
         data = await complete(request);
       } else {
@@ -482,10 +479,6 @@ export async function runOpenRouterAgent({
       throw error;
     }
 
-    if (typeof message.content === 'string' && message.content.trim()) {
-      lastAssistantText = message.content.trim();
-    }
-
     messages.push({
       role: 'assistant',
       content: message.content ?? null,
@@ -496,38 +489,28 @@ export async function runOpenRouterAgent({
 
     const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
     if (toolCalls.length === 0) {
-      const parsedFromContent = tryExtractStructuredResult(lastAssistantText, filesChanged);
-      const finalResult = {
-        ...parsedFromContent,
-        provider: 'openrouter',
-        model,
-        usage: usage.snapshot()
-      };
-      if (outputPath) {
-        const absOut = path.resolve(workingDir, outputPath);
-        fs.mkdirSync(path.dirname(absOut), { recursive: true });
-        fs.writeFileSync(absOut, JSON.stringify(finalResult, null, 2), 'utf8');
-      }
-      return finalResult;
+      messages.push({ role: 'user', content:
+        'No tool call was returned. Select the next tool, or call finish_task with the structured result if the task is complete. Prose alone does not complete the task.' });
+      continue;
     }
 
     for (const toolCall of toolCalls) {
       const fnName = toolCall?.function?.name;
       const fnArgs = toolCall?.function?.arguments;
-      const toolOutput = executeToolCall(fnName, fnArgs, {
-        workingDir,
-        outputPath,
-        filesChanged,
-        env,
-        runCommand
-      });
+      let toolOutput;
+      try {
+        toolOutput = await executeToolCall(fnName, fnArgs, { workingDir, outputPath, filesChanged, env, runCommand });
+      } catch (error) {
+        toolOutput = { ok: false, error: error.message };
+      }
 
       if (fnName === 'finish_task' && toolOutput.finished && toolOutput.result) {
         const enriched = {
           ...toolOutput.result,
           provider: 'openrouter',
           model,
-          usage: usage.snapshot()
+          usage: usage.snapshot(),
+          execution: execution('finish_task')
         };
         if (outputPath) {
           const absOut = path.resolve(workingDir, outputPath);
@@ -546,73 +529,39 @@ export async function runOpenRouterAgent({
     }
   }
 
-  const fallbackResult = {
-    status: 'completed',
+  const used = usage.snapshot();
+  const limitDescription = {
+    max_turns: `the turn limit (${maxTurns})`,
+    max_tokens: `the token limit (${maxTokensPerRun}; ${used.known_total_tokens} known tokens used)`,
+    max_cost: `the USD cost limit (${maxCostPerRunUsd}; ${used.known_cost_usd} known/estimated USD used)`
+  }[stopReason];
+  const incompleteResult = {
+    status: 'failed',
     provider: 'openrouter',
     model,
-    summary: lastAssistantText || `Reached maxTurns (${maxTurns}) without explicit finish_task call.`,
-    action_taken: filesChanged.size > 0 ? 'modified_files' : 'none',
+    summary: `Agent stopped after ${turnsUsed} turn(s) at ${limitDescription} without finish_task. No candidate changes were exported.`,
+    action_taken: 'incomplete',
     risk_level: 'low',
     verdict: 'none',
     breaking_api_change: false,
     gate_results: {},
-    files_changed: Array.from(filesChanged),
-    usage: usage.snapshot(),
+    files_changed: [],
+    usage: used,
+    execution: execution(stopReason),
     details: {
-      max_turns_reached: true,
-      tokens_used: usage.snapshot().total_tokens,
-      cost_usd: usage.snapshot().cost_usd
+      max_turns_reached: stopReason === 'max_turns',
+      tokens_used: used.total_tokens,
+      cost_usd: used.cost_usd
     }
   };
 
   if (outputPath) {
     const absOut = path.resolve(workingDir, outputPath);
     fs.mkdirSync(path.dirname(absOut), { recursive: true });
-    fs.writeFileSync(absOut, JSON.stringify(fallbackResult, null, 2), 'utf8');
+    fs.writeFileSync(absOut, JSON.stringify(incompleteResult, null, 2), 'utf8');
   }
 
-  return fallbackResult;
-}
-
-function tryExtractStructuredResult(text, filesChanged) {
-  if (text) {
-    const jsonMatch = text.match(/```json\s*([\s\S]*?)```/i) || text.match(/(\{[\s\S]*\})/);
-    if (jsonMatch) {
-      try {
-        const parsed = JSON.parse(jsonMatch[1]);
-        if (parsed && typeof parsed === 'object' && (parsed.summary || parsed.action_taken || parsed.verdict)) {
-          return {
-            ...resultPublicationFields(parsed),
-            status: parsed.status || 'completed',
-            summary: String(parsed.summary || text),
-            action_taken: String(parsed.action_taken || 'none'),
-            risk_level: ['low', 'medium', 'high', 'critical'].includes(parsed.risk_level) ? parsed.risk_level : 'low',
-            verdict: String(parsed.verdict || 'none'),
-            breaking_api_change: Boolean(parsed.breaking_api_change),
-            gate_results: parsed.gate_results && typeof parsed.gate_results === 'object' ? parsed.gate_results : {},
-            files_changed: Array.from(
-              new Set([...(Array.isArray(parsed.files_changed) ? parsed.files_changed : []), ...filesChanged])
-            ),
-            details: parsed.details && typeof parsed.details === 'object' ? parsed.details : {}
-          };
-        }
-      } catch {
-        // Ignore parse failure and fall back to text summary
-      }
-    }
-  }
-
-  return {
-    status: 'completed',
-    summary: text || 'Completed OpenRouter agent execution.',
-    action_taken: filesChanged.size > 0 ? 'modified_files' : 'none',
-    risk_level: 'low',
-    verdict: 'none',
-    breaking_api_change: false,
-    gate_results: {},
-    files_changed: Array.from(filesChanged),
-    details: {}
-  };
+  return incompleteResult;
 }
 
 function resultPublicationFields(result) {
@@ -666,11 +615,12 @@ if (isMain) {
     systemPrompt: cli.systemPrompt,
     model: cli.model,
     workingDir: cli.workingDir || process.cwd(),
-    maxTurns: cli.maxTurns || 25,
+    maxTurns: cli.maxTurns ?? 25,
     outputPath: cli.outputPath
   })
     .then((result) => {
       console.log(JSON.stringify(result, null, 2));
+      if (result.status === 'failed') process.exitCode = 1;
     })
     .catch((err) => {
       console.error(`OpenRouter agent failed: ${err.message}`);

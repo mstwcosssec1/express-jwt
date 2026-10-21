@@ -1,0 +1,8 @@
+{
+  "name": "lights-on-copilot-cli-tools",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "@github/copilot": "1.0.98"
+  }
+}

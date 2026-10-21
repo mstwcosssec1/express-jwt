@@ -21,7 +21,7 @@ import { literalPublicationBody } from './publication-text.mjs';
 import { fileURLToPath } from 'node:url';
 
 import { loadConfig, sanitizeGitHubOutputValue } from './load-config.mjs';
-import { reportWorkflowEvent } from './workflow-report.mjs';
+import { reportWorkflowEvent, githubItemUrl } from './workflow-report.mjs';
 import {
   LABELS,
   isMaintainerAssociation,
@@ -242,8 +242,8 @@ export function validateCommandRepoIsolation(
 }
 
 /**
- * Format an upstream issue/PR reference inside inline code backticks (`owner/repo#123`)
- * so GitHub does not generate cross-repository timeline pings on the upstream repository.
+ * Format a reference for display. The final publisher must still render the
+ * complete body as literal text to prevent cross-repository backlinks.
  */
 export function formatSafeUpstreamRef(upstreamRepo, number) {
   const norm = normalizeRepoFullName(upstreamRepo) || String(upstreamRepo || '').trim();
@@ -262,7 +262,7 @@ export function neutralizeCrossRepoAutoLinks(
 
 async function fetchGitHubApiGet(endpointPath, { token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN || '', fetchImpl = globalThis.fetch } = {}) {
   if (typeof fetchImpl !== 'function') {
-    return null;
+    throw new Error('Upstream discovery requires a fetch implementation.');
   }
   const cleanPath = String(endpointPath || '').replace(/^\/+/, '');
   const url = cleanPath.startsWith('https://') ? cleanPath : `https://api.github.com/${cleanPath}`;
@@ -274,17 +274,14 @@ async function fetchGitHubApiGet(endpointPath, { token = process.env.GH_TOKEN ||
     headers.Authorization = `Bearer ${token}`;
   }
 
-  try {
-    const res = await fetchImpl(url, {
-      method: 'GET',
-      headers,
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
-    });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch {
-    return null;
-  }
+  const res = await fetchImpl(url, {
+    method: 'GET',
+    headers,
+    redirect: 'error',
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
+  });
+  if (!res.ok) throw new Error(`Upstream request failed (HTTP ${res.status}): ${cleanPath}`);
+  return res.json();
 }
 
 /**
@@ -345,11 +342,7 @@ export async function resolveUpstreamRepo({
   if (lower !== 'auto') {
     const explicitRepo = normalizeRepoFullName(rawSetting);
     if (!explicitRepo) {
-      return {
-        installedRepo,
-        upstreamRepo: null,
-        source: 'invalid'
-      };
+      throw new Error('Invalid upstream.repo; use owner/repo, auto or none.');
     }
     if (installedRepo && explicitRepo.toLowerCase() === installedRepo.toLowerCase()) {
       return {
@@ -444,6 +437,10 @@ export async function fetchUpstreamContext({
     fetchGitHubApiGet(`repos/${validUpstream}/pulls?state=open&per_page=${Math.min(50, Math.max(1, maxPrs))}&sort=updated&direction=desc`, { token, fetchImpl }),
     fetchGitHubApiGet(`repos/${validUpstream}/releases?per_page=5`, { token, fetchImpl })
   ]);
+  if (!repoMeta || repoMeta.full_name?.toLowerCase() !== validUpstream.toLowerCase() ||
+      ![rawIssues, rawClosedIssues, rawPrs, rawReleases].every(Array.isArray)) {
+    throw new Error('Incomplete upstream snapshot; refusing to report empty issue/PR lists.');
+  }
 
   const openIssues = (Array.isArray(rawIssues) ? rawIssues : [])
     .filter((item) => !item.pull_request)
@@ -595,14 +592,14 @@ export function selectUnsyncedUpstreamItems({
     }
   }
 
-  const cap = Number.isFinite(Number(maxItems)) && Number(maxItems) > 0 ? Number(maxItems) : 3;
+  const cap = Number(maxItems);
+  if (!Number.isSafeInteger(cap) || cap < 0) throw new Error('upstream.max_items_per_run must be a nonnegative integer.');
   return candidates.slice(0, cap);
 }
 
 /**
  * Build a local tracking issue title and body to be created ONLY in `installedRepo`
- * for an upstream issue/PR. Uses backtick-escaped references so GitHub does not
- * spam the upstream repository's timeline.
+ * for an upstream issue/PR. Final reference isolation belongs to the publisher.
  */
 export function buildLocalUpstreamTrackingIssue(item, { upstreamRepo, installedRepo }) {
   assertWriteTargetIsInstalledRepo(installedRepo, installedRepo, upstreamRepo);
@@ -721,39 +718,19 @@ export async function syncUpstream({
 
   let existingLocalItems = [];
   if (localItemsPath && fs.existsSync(localItemsPath)) {
-    try {
-      existingLocalItems = JSON.parse(fs.readFileSync(localItemsPath, 'utf8'));
-    } catch {}
+    existingLocalItems = JSON.parse(fs.readFileSync(localItemsPath, 'utf8'));
   } else if (createLocalIssues && resolution.installedRepo) {
-    try {
-      const safeInstalled = assertWriteTargetIsInstalledRepo(
-        resolution.installedRepo,
-        resolution.installedRepo,
-        resolution.upstreamRepo
-      );
-      const rawList = execFileImpl(
-        'gh',
-        [
-          'issue',
-          'list',
-          '--repo',
-          safeInstalled,
-          '--state',
-          'all',
-          '--label',
-          'lights-on:upstream',
-          '--limit',
-          '50',
-          '--json',
-          'number,author,body,labels,comments'
-        ],
-        { encoding: 'utf8', env: { ...process.env, ...env } }
-      );
-      existingLocalItems = JSON.parse(rawList || '[]');
-    } catch {
-      existingLocalItems = [];
-    }
+    const safeInstalled = assertWriteTargetIsInstalledRepo(
+      resolution.installedRepo, resolution.installedRepo, resolution.upstreamRepo
+    );
+    const rawList = execFileImpl('gh', [
+      'issue', 'list', '--repo', safeInstalled, '--state', 'all',
+      '--label', 'lights-on:upstream', '--limit', '50',
+      '--json', 'number,author,body,labels,comments'
+    ], { encoding: 'utf8', env: { ...process.env, ...env } });
+    existingLocalItems = JSON.parse(rawList);
   }
+  if (!Array.isArray(existingLocalItems)) throw new Error('Invalid upstream tracking-issue inventory; refusing duplicate publication.');
 
   const state = loadState(stateFile ? { stateFile } : {});
   const unsynced = selectUnsyncedUpstreamItems({
@@ -785,6 +762,7 @@ export async function syncUpstream({
   }
 
   const createdLocalIssues = [];
+  const failures = [];
   if (createLocalIssues && resolution.installedRepo && mirroredIssues.length > 0) {
     const safeInstalled = assertWriteTargetIsInstalledRepo(
       resolution.installedRepo,
@@ -820,8 +798,11 @@ export async function syncUpstream({
             { encoding: 'utf8', env: { ...process.env, ...env } }
           ) || ''
         ).trim();
-        const numMatch = out.match(/\/issues\/(\d+)/);
+        const numMatch = out.match(/\/issues\/([1-9]\d*)$/);
         const localNumber = numMatch ? Number(numMatch[1]) : null;
+        if (!localNumber || out !== githubItemUrl(safeInstalled, 'issues', localNumber, env)) {
+          throw new Error('Could not confirm tracking issue URL.');
+        }
         markUpstreamItemSynced(state, {
           upstreamRepo: resolution.upstreamRepo,
           number: item.number,
@@ -833,18 +814,22 @@ export async function syncUpstream({
           localIssueNumber: localNumber,
           url: out
         });
+        saveState(state, stateFile ? { stateFile } : {});
         reportWorkflowEvent({ title: 'Upstream tracking issue created',
           message: `Created local tracking issue for ${resolution.upstreamRepo}#${item.number}.`,
           url: out, details: { Repository: safeInstalled, 'Issue title': item.title } }, { env });
       } catch (err) {
-        reportWorkflowEvent({ level: 'warning', title: 'Upstream issue mirroring failed',
+        failures.push(item.number);
+        reportWorkflowEvent({ level: 'error', title: 'Upstream issue mirroring failed',
           message: `Could not mirror upstream item #${item.number}: ${err.message}` }, { env });
-        console.warn(`Warning: failed to mirror upstream item #${item.number} locally:`, err.message);
+      } finally {
+        fs.unlinkSync(tmpBodyFile);
       }
     }
   }
 
   saveState(state, stateFile ? { stateFile } : {});
+  if (failures.length) throw new Error(`Upstream mirroring failed for ${failures.length} item(s); confirmed successes remain recorded.`);
 
   return {
     enabled: true,

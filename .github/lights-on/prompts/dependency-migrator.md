@@ -1,6 +1,6 @@
 # Execute one approved dependency migration
 
-Execute only the reviewed plan included in the trusted Step D1 selection.
+Execute only the reviewed plan included in the trusted Step D selection.
 The controller requires a matching dependencies.approved_migrations entry on
 the default branch. Do not expand the replacement choice, version, file list,
 or public API beyond that plan.

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './load-config.mjs';
 import { loadState, saveState } from './state-store.mjs';
+import { compareSemver, tomlPackageSection } from './prepare-release.mjs';
 
 const IGNORED_DIRS = new Set([
   'node_modules',
@@ -69,7 +70,10 @@ export function classifyVersionBump(currentVersion, latestVersion) {
     if (lat.patch < cur.patch) return null;
     if (lat.patch > cur.patch) return 'patch';
     if (cur.prerelease && !lat.prerelease) return 'patch';
-    if (cur.prerelease && lat.prerelease && cur.prerelease !== lat.prerelease) return 'patch';
+    if (cur.prerelease && lat.prerelease) {
+      const normalized = (v) => `${v.major}.${v.minor}.${v.patch}-${v.prerelease}`;
+      return compareSemver(normalized(lat), normalized(cur)) > 0 ? 'patch' : null;
+    }
     return null;
   }
 
@@ -85,12 +89,7 @@ function findFiles(dir, predicate, maxDepth = 3, currentDepth = 0) {
   const results = [];
   if (currentDepth > maxDepth || !fs.existsSync(dir)) return results;
 
-  let entries = [];
-  try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return results;
-  }
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
 
   for (const entry of entries) {
     if (IGNORED_DIRS.has(entry.name)) continue;
@@ -115,8 +114,9 @@ function parseNpmManifest(filePath, repoRoot) {
   try {
     pkg = JSON.parse(fs.readFileSync(filePath, 'utf8'));
   } catch {
-    return { packageInfo, dependencies };
+    throw new Error(`Invalid or unreadable npm manifest: ${relManifest}`);
   }
+  if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg)) throw new Error(`Invalid npm manifest object: ${relManifest}`);
 
   let lockPackages = null;
   const lockPath = path.join(path.dirname(filePath), 'package-lock.json');
@@ -125,7 +125,7 @@ function parseNpmManifest(filePath, repoRoot) {
       const lockJson = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
       lockPackages = lockJson.packages || lockJson.dependencies || null;
     } catch {
-      lockPackages = null;
+      throw new Error(`Invalid or unreadable npm lockfile: ${toPosixRelative(repoRoot, lockPath)}`);
     }
   }
 
@@ -166,7 +166,12 @@ function parseNpmManifest(filePath, repoRoot) {
     }
   };
 
-  addDepMap(pkg.dependencies, false);
+  for (const name of ['dependencies', 'optionalDependencies', 'devDependencies', 'peerDependencies']) {
+    if (pkg[name] !== undefined && (!pkg[name] || typeof pkg[name] !== 'object' || Array.isArray(pkg[name]) ||
+      !Object.values(pkg[name]).every((value) => typeof value === 'string'))) throw new Error(`Invalid npm ${name}: ${relManifest}`);
+  }
+  // npm's optional declarations override dependencies with the same name.
+  addDepMap({ ...pkg.dependencies, ...pkg.optionalDependencies }, false);
   addDepMap(pkg.devDependencies, true);
   addDepMap(pkg.peerDependencies, false);
 
@@ -195,12 +200,7 @@ function parseRequirementsTxt(filePath, repoRoot) {
   const relManifest = toPosixRelative(repoRoot, filePath);
   const isDev = /dev|test/i.test(path.basename(filePath));
 
-  let content = '';
-  try {
-    content = fs.readFileSync(filePath, 'utf8');
-  } catch {
-    return { packageInfo: [], dependencies };
-  }
+  const content = fs.readFileSync(filePath, 'utf8');
 
   for (const rawLine of content.replace(/\r\n/g, '\n').split('\n')) {
     const parsed = parsePythonReqSpec(rawLine);
@@ -226,13 +226,7 @@ function parsePyprojectToml(filePath, repoRoot) {
   const dependencies = [];
   const relManifest = toPosixRelative(repoRoot, filePath);
 
-  let content = '';
-  try {
-    content = fs.readFileSync(filePath, 'utf8');
-  } catch {
-    return { packageInfo, dependencies };
-  }
-
+  const content = tomlPackageSection(fs.readFileSync(filePath, 'utf8'), ['project', 'tool.poetry'])?.text || '';
   const nameMatch = content.match(/^\s*name\s*=\s*["']([^"']+)["']/m);
   const versionMatch = content.match(/^\s*version\s*=\s*["']([^"']+)["']/m);
   const reqPythonMatch = content.match(/^\s*requires-python\s*=\s*["']([^"']+)["']/m);
@@ -249,13 +243,16 @@ function parsePyprojectToml(filePath, repoRoot) {
     });
   }
 
-  const depsBlockMatch = content.match(/^\s*dependencies\s*=\s*\[([\s\S]*?)\]/m);
+  const depsBlockMatch = content.match(/^\s*dependencies\s*=\s*\[((?:"(?:\\.|[^"\\])*"|'[^']*'|#[^\r\n]*|[^\]'"])*?)\]/m);
+  if (/^\s*dependencies\s*=/m.test(content) && !depsBlockMatch) throw new Error(`Unsupported or invalid Python dependency array: ${relManifest}`);
   if (depsBlockMatch) {
     const block = depsBlockMatch[1];
-    const itemRegex = /["']([^"']+)["']/g;
+    const itemRegex = /#[^\r\n]*|"(?:\\.|[^"\\])*"|'[^']*'/g;
+    if (block.replace(itemRegex, '').replace(/[\s,]/g, '')) throw new Error(`Invalid Python dependency array: ${relManifest}`);
     let m;
     while ((m = itemRegex.exec(block)) !== null) {
-      const parsed = parsePythonReqSpec(m[1]);
+      if (m[0].startsWith('#')) continue;
+      const parsed = parsePythonReqSpec(m[0].startsWith('"') ? JSON.parse(m[0]) : m[0].slice(1, -1));
       if (parsed) {
         dependencies.push({
           ecosystem: 'pypi',
@@ -279,12 +276,7 @@ function parseCargoToml(filePath, repoRoot) {
   const dependencies = [];
   const relManifest = toPosixRelative(repoRoot, filePath);
 
-  let content = '';
-  try {
-    content = fs.readFileSync(filePath, 'utf8');
-  } catch {
-    return { packageInfo, dependencies };
-  }
+  const content = fs.readFileSync(filePath, 'utf8');
 
   let currentSection = '';
   let pkgName = null;
@@ -362,12 +354,7 @@ function parseGoMod(filePath, repoRoot) {
   const dependencies = [];
   const relManifest = toPosixRelative(repoRoot, filePath);
 
-  let content = '';
-  try {
-    content = fs.readFileSync(filePath, 'utf8');
-  } catch {
-    return { packageInfo, dependencies };
-  }
+  const content = fs.readFileSync(filePath, 'utf8');
 
   let moduleName = null;
   let goVersion = null;
@@ -452,12 +439,7 @@ function parseCsproj(filePath, repoRoot) {
   const dependencies = [];
   const relManifest = toPosixRelative(repoRoot, filePath);
 
-  let content = '';
-  try {
-    content = fs.readFileSync(filePath, 'utf8');
-  } catch {
-    return { packageInfo, dependencies };
-  }
+  const content = fs.readFileSync(filePath, 'utf8');
 
   const pkgIdMatch =
     content.match(/<PackageId>\s*([^<\s]+)\s*<\/PackageId>/i) ||
@@ -507,12 +489,7 @@ function parseGemfile(filePath, repoRoot) {
   const dependencies = [];
   const relManifest = toPosixRelative(repoRoot, filePath);
 
-  let content = '';
-  try {
-    content = fs.readFileSync(filePath, 'utf8');
-  } catch {
-    return { packageInfo, dependencies };
-  }
+  const content = fs.readFileSync(filePath, 'utf8');
 
   let inDevGroup = false;
   for (const rawLine of content.replace(/\r\n/g, '\n').split('\n')) {
@@ -552,12 +529,7 @@ function parseWorkflowActions(filePath, repoRoot) {
   const githubActions = [];
   const relWorkflow = toPosixRelative(repoRoot, filePath);
 
-  let content = '';
-  try {
-    content = fs.readFileSync(filePath, 'utf8');
-  } catch {
-    return githubActions;
-  }
+  const content = fs.readFileSync(filePath, 'utf8');
 
   for (const rawLine of content.replace(/\r\n/g, '\n').split('\n')) {
     const trimmed = rawLine.trim();
@@ -567,7 +539,7 @@ function parseWorkflowActions(filePath, repoRoot) {
     if (!match) continue;
 
     const rawUses = match[1].replace(/^['"]|['"]$/g, '');
-    if (rawUses.startsWith('./') || rawUses.startsWith('.\\') || rawUses.startsWith('docker://')) {
+    if (rawUses.startsWith('./') || rawUses.startsWith('.\\') || rawUses.startsWith('$/') || rawUses.startsWith('docker://')) {
       continue;
     }
 
@@ -664,7 +636,7 @@ export function detectManifestsAndDeps(repoRoot = process.cwd()) {
   };
 }
 
-function extractFixedVersionFromVuln(vuln) {
+function extractFixedVersionFromVuln(vuln, dep = {}) {
   if (!vuln || typeof vuln !== 'object') return { explicit: false, fixedVersion: null };
 
   if (
@@ -690,12 +662,19 @@ function extractFixedVersionFromVuln(vuln) {
   }
 
   if (Array.isArray(vuln.affected)) {
+    const ecosystem = dep.osvEcosystem || { npm: 'npm', pypi: 'PyPI', cargo: 'crates.io', go: 'Go', nuget: 'NuGet', rubygems: 'RubyGems' }[dep.ecosystem];
+    const normalizeName = (name) => ecosystem === 'PyPI' ? name.toLowerCase().replace(/[-_.]+/g, '-') :
+      ecosystem === 'NuGet' ? name.toLowerCase() : name;
     for (const aff of vuln.affected) {
+      if (aff?.package && ((ecosystem && aff.package.ecosystem !== ecosystem) ||
+          normalizeName(aff.package.name || '') !== normalizeName(dep.name || ''))) continue;
       if (Array.isArray(aff?.ranges)) {
         for (const range of aff.ranges) {
           if (Array.isArray(range?.events)) {
             for (const ev of range.events) {
               if (typeof ev?.fixed === 'string' && ev.fixed.trim() !== '') {
+                if (range.type === 'SEMVER' && /^v?\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(dep.resolvedVersion || '') &&
+                    compareSemver(ev.fixed, dep.resolvedVersion) <= 0) continue;
                 return { explicit: true, fixedVersion: ev.fixed.trim() };
               }
             }
@@ -787,10 +766,10 @@ export function evaluateDependencyHealth(
 
   const cves = vulns.map((v) => {
     if (typeof v === 'string') {
-      return { id: v, fixedVersion: outdated ? latestVersion : null };
+      return { id: v, fixedVersion: null };
     }
-    const { explicit, fixedVersion } = extractFixedVersionFromVuln(v);
-    const resolvedFixed = explicit ? fixedVersion : outdated ? latestVersion : null;
+    const { explicit, fixedVersion } = extractFixedVersionFromVuln(v, dep);
+    const resolvedFixed = explicit ? fixedVersion : null;
     return {
       ...v,
       id: v.id || v.cve || (Array.isArray(v.aliases) ? v.aliases[0] : 'UNKNOWN'),
@@ -841,7 +820,7 @@ function getCachedEntry(state, key, nowMs = Date.now()) {
   const entry = state?.ecosystem_cache?.[key];
   if (!entry || !entry.fetchedAt || !entry.data) return null;
   const age = nowMs - new Date(entry.fetchedAt).getTime();
-  if (Number.isNaN(age) || age > CACHE_TTL_MS) return null;
+  if (!Number.isFinite(age) || age < 0 || age > CACHE_TTL_MS) return null;
   return entry.data;
 }
 
@@ -862,7 +841,8 @@ async function safeFetchJson(fetchImpl, url, options = {}) {
     const res = await fetchImpl(url, {
       headers: { Accept: 'application/json', ...(options.headers || {}) },
       signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(15_000) : undefined,
-      ...options
+      ...options,
+      redirect: 'error'
     });
     if (!res || !res.ok) return null;
     return await res.json();
@@ -871,8 +851,34 @@ async function safeFetchJson(fetchImpl, url, options = {}) {
   }
 }
 
+function scanFetch(fetchImpl) {
+  const requests = new Map();
+  const waiting = [];
+  let active = 0;
+  return async (url, options = {}) => {
+    const key = JSON.stringify([url, options.method || 'GET', options.body || '']);
+    if (!requests.has(key)) {
+      requests.set(key, (async () => {
+        if (active < 4) active++;
+        else await new Promise((resolve) => waiting.push(resolve));
+        try {
+          const response = await fetchImpl(url, { ...options, signal: AbortSignal.timeout(15000) });
+          return { ok: response.ok, data: response.ok ? await response.json() : null };
+        } finally {
+          const next = waiting.shift();
+          if (next) next();
+          else active--;
+        }
+      })());
+    }
+    const result = await requests.get(key);
+    // Cache parsed data, not a Response whose body can only be consumed once.
+    return { ok: result.ok, json: async () => result.data };
+  };
+}
+
 async function fetchSinglePackageDependents(pkg, { fetchImpl = globalThis.fetch, state } = {}) {
-  const fallback = { dependentPackagesCount: 0, downloads: 0, topDependents: [] };
+  const fallback = { dependentPackagesCount: null, downloads: null, topDependents: [] };
   if (!pkg || !pkg.registry || !pkg.name) return fallback;
 
   const cacheKey = `dependents:${pkg.registry}:${pkg.name}`;
@@ -880,31 +886,31 @@ async function fetchSinglePackageDependents(pkg, { fetchImpl = globalThis.fetch,
   if (cached) return cached;
 
   if (typeof fetchImpl !== 'function') {
-    return state?.ecosystem_cache?.[cacheKey]?.data || fallback;
+    return fallback;
   }
 
   const baseUrl = `https://packages.ecosyste.ms/api/v1/registries/${pkg.registry}/packages/${encodeURIComponent(pkg.name)}`;
-  const pkgData = await safeFetchJson(fetchImpl, baseUrl);
-  const depListData = await safeFetchJson(fetchImpl, `${baseUrl}/dependent_packages?per_page=20`);
+  const [pkgData, depListData] = await Promise.all([
+    safeFetchJson(fetchImpl, baseUrl),
+    safeFetchJson(fetchImpl, `${baseUrl}/dependent_packages?per_page=20`)
+  ]);
 
   if (!pkgData && !depListData) {
-    return state?.ecosystem_cache?.[cacheKey]?.data || fallback;
+    return fallback;
   }
 
+  const count = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
   const topDependents = Array.isArray(depListData)
     ? depListData.slice(0, 20).map((d) => ({
         name: d.name || '',
-        downloads: Number(d.downloads ?? 0),
+        downloads: count(d.downloads),
         latest_release_number: d.latest_release_number || null
       }))
     : [];
 
-  const dependentPackagesCount = Number(
-    pkgData?.dependent_packages_count ??
-      pkgData?.dependents_count ??
-      topDependents.length
-  );
-  const downloads = Number(pkgData?.downloads ?? 0);
+  const dependentPackagesCount = count(pkgData?.dependent_packages_count ?? pkgData?.dependents_count) ??
+    (Array.isArray(depListData) && depListData.length < 20 ? depListData.length : null);
+  const downloads = count(pkgData?.downloads);
 
   const result = {
     dependentPackagesCount,
@@ -929,18 +935,19 @@ export async function fetchDownstreamDependents(
 
   if (Array.isArray(packageInfo)) {
     if (packageInfo.length === 0) return fallback;
-    if (packageInfo.length === 1) {
-      return fetchSinglePackageDependents(packageInfo[0], { fetchImpl, state });
+    const packages = [...new Map(packageInfo.map((pkg) => [`${pkg.registry}:${pkg.name}`, pkg])).values()];
+    if (packages.length === 1) {
+      return fetchSinglePackageDependents(packages[0], { fetchImpl, state });
     }
 
     let totalDependents = 0;
     let totalDownloads = 0;
     const allTop = [];
 
-    for (const pkg of packageInfo) {
+    for (const pkg of packages) {
       const res = await fetchSinglePackageDependents(pkg, { fetchImpl, state });
-      totalDependents += res.dependentPackagesCount;
-      totalDownloads += res.downloads;
+      totalDependents = totalDependents === null || res.dependentPackagesCount === null ? null : totalDependents + res.dependentPackagesCount;
+      totalDownloads = totalDownloads === null || res.downloads === null ? null : totalDownloads + res.downloads;
       allTop.push(...res.topDependents);
     }
 
@@ -998,6 +1005,24 @@ async function fetchOsvVulnerabilities(dependencies, { fetchImpl, offline }) {
 
   if (queries.length === 0) return { vulnsByIndex, checked };
 
+  const fullQuery = async (query) => {
+    const vulns = [], seen = new Set();
+    let pageToken;
+    for (let page = 0; page < 100; page++) {
+      const data = await safeFetchJson(fetchImpl, 'https://api.osv.dev/v1/query', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...query, ...(pageToken ? { page_token: pageToken } : {}) })
+      });
+      if (!data || Array.isArray(data) || data.error || (data.vulns !== undefined && !Array.isArray(data.vulns)) ||
+          data.vulns?.some((vuln) => !vuln || !Array.isArray(vuln.affected))) return null;
+      vulns.push(...(data.vulns || []));
+      if (!data.next_page_token) return vulns;
+      if (typeof data.next_page_token !== 'string' || seen.has(data.next_page_token)) return null;
+      pageToken = data.next_page_token;
+      seen.add(pageToken);
+    }
+    return null;
+  };
   const batchData = await safeFetchJson(fetchImpl, 'https://api.osv.dev/v1/querybatch', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1005,27 +1030,28 @@ async function fetchOsvVulnerabilities(dependencies, { fetchImpl, offline }) {
   });
 
   if (batchData && Array.isArray(batchData.results) && batchData.results.length === queries.length) {
-    batchData.results.forEach((res, qIdx) => {
+    await Promise.all(batchData.results.map(async (res, qIdx) => {
       const depIdx = queryableIndices[qIdx];
       if (depIdx !== undefined && res && typeof res === 'object' &&
           !Array.isArray(res) && !res.error && (res.vulns === undefined || Array.isArray(res.vulns))) {
         vulnsByIndex[depIdx] = res.vulns || [];
         checked[depIdx] = true;
+        // OSV batch results contain IDs/modified times, not affected ranges.
+        if (res.next_page_token || res.vulns?.some((vuln) => !vuln || !Array.isArray(vuln.affected))) {
+          const full = await fullQuery(queries[qIdx]);
+          checked[depIdx] = full !== null;
+          if (checked[depIdx]) vulnsByIndex[depIdx] = full;
+        }
       }
-    });
+    }));
     return { vulnsByIndex, checked };
   }
 
   for (let i = 0; i < queries.length; i++) {
     const depIdx = queryableIndices[i];
-    const singleData = await safeFetchJson(fetchImpl, 'https://api.osv.dev/v1/query', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(queries[i])
-    });
-    if (singleData && typeof singleData === 'object' && !Array.isArray(singleData) &&
-        !singleData.error && (singleData.vulns === undefined || Array.isArray(singleData.vulns))) {
-      vulnsByIndex[depIdx] = singleData.vulns || [];
+    const singleData = await fullQuery(queries[i]);
+    if (singleData !== null) {
+      vulnsByIndex[depIdx] = singleData;
       checked[depIdx] = true;
     }
   }
@@ -1034,8 +1060,7 @@ async function fetchOsvVulnerabilities(dependencies, { fetchImpl, offline }) {
 }
 
 /**
- * Performs complete on-demand discovery of repository manifests, downstream dependents,
- * upstream dependency health, and OSV vulnerabilities.
+ * Scans supported manifest forms. Missing remote evidence is carried in the report.
  */
 export async function scanRepositoryDependencies({
   repoRoot = process.cwd(),
@@ -1045,6 +1070,7 @@ export async function scanRepositoryDependencies({
   offline = false
 } = {}) {
   const resolvedConfig = config || loadConfig({ repoRoot });
+  if (typeof fetchImpl === 'function') fetchImpl = scanFetch(fetchImpl);
   const policy =
     resolvedConfig?.policies?.dependency_health ||
     resolvedConfig?.dependencies ||
@@ -1054,26 +1080,25 @@ export async function scanRepositoryDependencies({
   const { packageInfo, dependencies: rawDeps, githubActions } = detectManifestsAndDeps(repoRoot);
 
   const downstreamDependents = offline
-    ? { dependentPackagesCount: 0, downloads: 0, topDependents: [] }
+    ? { dependentPackagesCount: packageInfo.length ? null : 0, downloads: packageInfo.length ? null : 0, topDependents: [] }
     : await fetchDownstreamDependents(packageInfo, { fetchImpl, state });
 
   const osvResults = await fetchOsvVulnerabilities(rawDeps, { fetchImpl, offline });
 
-  const evaluatedDeps = [];
-  for (let i = 0; i < rawDeps.length; i++) {
-    const dep = rawDeps[i];
+  const evaluatedDeps = await Promise.all(rawDeps.map(async (dep, i) => {
     const ecoData = await fetchUpstreamPackageMetadata(dep, { fetchImpl, state, offline });
     const vulns = osvResults.vulnsByIndex[i] || [];
     const metadata = state?.ecosystem_cache?.[`pkg:${dep.registry}:${dep.name}`];
-    evaluatedDeps.push({
+    return {
       ...evaluateDependencyHealth(dep, ecoData, vulns, policy),
       evidence: {
         advisory_checked: osvResults.checked[i],
         metadata_available: !offline && Boolean(ecoData.latest_release_number) &&
-          (!metadata || Date.now() - Date.parse(metadata.fetchedAt) <= CACHE_TTL_MS)
+          (!metadata || (Date.now() >= Date.parse(metadata.fetchedAt) &&
+            Date.now() - Date.parse(metadata.fetchedAt) <= CACHE_TTL_MS))
       }
-    });
-  }
+    };
+  }));
 
   const summary = {
     total: evaluatedDeps.length,
@@ -1116,11 +1141,7 @@ async function runCli() {
   const state = loadState();
   const report = await scanRepositoryDependencies({ repoRoot, config, state, offline });
 
-  try {
-    saveState(state);
-  } catch {
-    // Ignore state persistence failure in read-only environments
-  }
+  saveState(state);
 
   const json = JSON.stringify(report, null, 2);
   if (outputPath) {

@@ -1,9 +1,11 @@
 name: Lights On - PR Review & Auto-Merge Gatekeeper
 
 on:
-  pull_request_target:
+  # Check out the trusted base, never the PR head; review inputs are data and reviewer commands are disabled.
+  pull_request_target: # zizmor: ignore[dangerous-triggers]
     types: [opened, synchronize, reopened, ready_for_review, labeled]
-  workflow_run:
+  # No triggering-run artifacts or head checkout; fetch fresh PR data and re-evaluate CI before merging.
+  workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows: ["CI", "Lights On - Self Test CI", "Test", "Lint Commits"]
     types: [completed]
   workflow_dispatch:
@@ -17,19 +19,20 @@ concurrency:
   group: lights-on-maintenance-budget-${{ github.repository }}
   cancel-in-progress: false
 
-permissions:
-  contents: write
-  issues: write
-  pull-requests: write
-  checks: read
-  actions: read
+permissions: {}
 
 jobs:
   review-and-gate:
     name: 4-Gate Review & Auto-Merge Verification
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # Merge the exact reviewed commit after the final gate.
+      pull-requests: write # Read PR inputs, submit reviews and manage PR/repository labels.
+      checks: read # Verify current check runs and their publishing App identities.
+      statuses: read # Verify legacy commit-status contexts on the reviewed SHA.
     timeout-minutes: 25
     if: >-
+      github.repository != 'scovetta/lights-on' &&
       vars.LIGHTS_ON_ENABLED != 'false' &&
       (github.event_name != 'workflow_dispatch' || github.ref_name == github.event.repository.default_branch)
     steps:
@@ -38,11 +41,13 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
 
       - name: Setup Node.js 24
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
+          package-manager-cache: false
 
       - name: Load Lights On configuration
         id: config
@@ -164,8 +169,6 @@ jobs:
       # Step 3 — Run scan-dependencies.mjs so Gate 3 has live downstream dependent package data
       - name: Scan dependencies and downstream ecosystem dependents
         if: steps.config.outputs.enabled != 'false' && steps.pr-data.outputs.has_pr == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           node .github/lights-on/runner/scan-dependencies.mjs --output /tmp/lights-on-deps.json
 
@@ -190,9 +193,8 @@ jobs:
           steps.pr-data.outputs.has_pr == 'true' &&
           steps.pr-data.outputs.needs_review == 'true' &&
           (steps.preflight.outputs.safeToReview == 'true' || steps.preflight.outputs.safe_to_review == 'true')
-        uses: ./.github/actions/lights-on-agent
+        uses: $/.github/actions/lights-on-agent
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -236,6 +238,11 @@ jobs:
           }
 
           const review = JSON.parse(fs.readFileSync(reviewFile, 'utf8'));
+          if (review.status !== 'completed' || review.dry_run) {
+            reportWorkflowEvent({ level: 'warning', title: 'PR review submission skipped',
+              message: 'The result is synthetic or incomplete; no review or labels were posted.' });
+            process.exit(0);
+          }
           const prNumber = process.env.PR_NUMBER;
           const headSha = process.env.HEAD_SHA;
 
@@ -282,12 +289,18 @@ jobs:
           if (labelsToAdd.length > 0) {
             try {
               execFileSync('gh', ['pr', 'edit', prNumber, '--repo', installedRepo, '--add-label', labelsToAdd.join(',')], { stdio: 'inherit' });
-            } catch {}
+            } catch (err) {
+              reportWorkflowEvent({ level: 'error', title: 'PR label update failed', message: err.message });
+              throw err;
+            }
           }
           if (removeSet.size > 0) {
             try {
               execFileSync('gh', ['pr', 'edit', prNumber, '--repo', installedRepo, '--remove-label', Array.from(removeSet).join(',')], { stdio: 'inherit' });
-            } catch {}
+            } catch (err) {
+              reportWorkflowEvent({ level: 'error', title: 'PR label cleanup failed', message: err.message });
+              throw err;
+            }
           }
           EOF
 
@@ -342,10 +355,6 @@ jobs:
           HEAD_SHA: ${{ steps.pr-data.outputs.head_sha }}
           MERGE_METHOD: ${{ steps.merge-gate.outputs.mergeMethod || steps.merge-gate.outputs.merge_method || steps.config.outputs.mergeMethod || steps.config.outputs.merge_method || 'squash' }}
         run: |
-          is_draft=$(node -e 'const fs=require("node:fs"); const pr=JSON.parse(fs.readFileSync("/tmp/pr.json","utf8")); console.log(Boolean(pr.draft));')
-          if [ "$is_draft" = "true" ]; then
-            node .github/lights-on/runner/github-io.mjs pr ready "$PR_NUMBER" --repo "$GITHUB_REPOSITORY"
-          fi
           case "$MERGE_METHOD" in
             merge) method_flag="--merge" ;;
             rebase) method_flag="--rebase" ;;

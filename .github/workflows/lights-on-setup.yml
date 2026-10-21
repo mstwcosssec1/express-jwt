@@ -1,0 +1,45 @@
+name: Lights On - Discover Required CI Checks
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: lights-on-ci-discovery-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  discover:
+    name: Discover Required CI Checks
+    if: >-
+      github.repository != 'scovetta/lights-on' &&
+      github.ref_name == github.event.repository.default_branch && vars.LIGHTS_ON_ENABLED != 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # Read the trusted configuration and target-branch commits.
+      checks: read # Discover exact check names and publishing App identities.
+      statuses: read # Discover legacy commit-status identities.
+      actions: read # Map check suites to workflow-run names.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Discover and preview trusted CI requirements
+        env:
+          GH_TOKEN: ${{ secrets.LIGHTS_ON_SETUP_TOKEN || github.token }}
+        run: node .github/lights-on/runner/discover-required-checks.mjs --write --update-workflows
+      - name: Upload proposed configuration for maintainer review
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lights-on-ci-configuration
+          include-hidden-files: true
+          retention-days: 7
+          path: |
+            .github/lights-on.yml
+            .github/workflows/lights-on-pr.yml

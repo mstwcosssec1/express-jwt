@@ -8,6 +8,7 @@ export const DEFAULT_CONFIG = {
   events: { allow_external_triggers: false },
   engine: {
     provider: 'auto',
+    copilot_backend: 'cli',
     models: {
       default: '',
       reasoning: ''
@@ -123,6 +124,12 @@ export const PROVIDER_REASONING_MODELS = {
   openrouter: 'anthropic/claude-opus-5.5'
 };
 
+function escapedQuote(text, index) {
+  let slashes = 0;
+  while (index > 0 && text[--index] === '\\') slashes++;
+  return slashes % 2 === 1;
+}
+
 function stripInlineComment(raw) {
   let inSingle = false;
   let inDouble = false;
@@ -130,7 +137,7 @@ function stripInlineComment(raw) {
     const ch = raw[i];
     if (ch === "'" && !inDouble) {
       inSingle = !inSingle;
-    } else if (ch === '"' && !inSingle && raw[i - 1] !== '\\') {
+    } else if (ch === '"' && !inSingle && !escapedQuote(raw, i)) {
       inDouble = !inDouble;
     } else if (ch === '#' && !inSingle && !inDouble) {
       if (i === 0 || /\s/.test(raw[i - 1])) {
@@ -153,7 +160,7 @@ function splitFlowItems(inner) {
     if (ch === "'" && !inDouble) {
       inSingle = !inSingle;
       current += ch;
-    } else if (ch === '"' && !inSingle && inner[i - 1] !== '\\') {
+    } else if (ch === '"' && !inSingle && !escapedQuote(inner, i)) {
       inDouble = !inDouble;
       current += ch;
     } else if (!inSingle && !inDouble) {
@@ -190,7 +197,7 @@ function parseScalar(raw) {
 
   if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
     const inner = val.slice(1, -1);
-    return val.startsWith('"') ? inner.replace(/\\"/g, '"').replace(/\\n/g, '\n') : inner;
+    return val.startsWith('"') ? JSON.parse(val) : inner.replace(/''/g, "'");
   }
 
   if (val.startsWith('[') && val.endsWith(']')) {
@@ -209,6 +216,7 @@ function parseScalar(raw) {
         const k = pair.slice(0, colonIdx).trim().replace(/^['"]|['"]$/g, '');
         const v = pair.slice(colonIdx + 1).trim();
         if (isSafeObjectKey(k)) {
+          if (Object.hasOwn(obj, k)) throw new Error(`Duplicate YAML key: ${k}`);
           obj[k] = parseScalar(v);
         }
       }
@@ -228,15 +236,16 @@ function parseScalar(raw) {
  * Supports comments (#), nested indentation maps, block lists (- item),
  * inline lists ([a, b]), inline maps ({ a: 1 }), booleans, numbers, and strings.
  */
-export function parseSimpleYaml(text) {
+export function parseSimpleYaml(text, { strict = false } = {}) {
   if (!text || typeof text !== 'string') return {};
 
-  const rawLines = text.replace(/\r\n/g, '\n').split('\n');
+  const rawLines = text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').split('\n');
   const lines = [];
 
   for (const rawLine of rawLines) {
     const trimmed = rawLine.trim();
     if (!trimmed || trimmed.startsWith('#')) continue;
+    if (strict && /^\s*\t/.test(rawLine)) throw new Error('YAML indentation must use spaces.');
     const indent = rawLine.match(/^(\s*)/)[1].length;
     lines.push({ indent, content: stripInlineComment(trimmed) });
   }
@@ -259,6 +268,7 @@ export function parseSimpleYaml(text) {
         const line = lines[idx];
         if (line.indent < blockIndent) break;
         if (line.indent > blockIndent) {
+          if (strict) throw new Error('Unsupported YAML list indentation; use inline maps or a hyphen on its own line.');
           idx++;
           continue;
         }
@@ -270,6 +280,9 @@ export function parseSimpleYaml(text) {
           arr.push(nested.value);
           idx = nested.nextIndex;
         } else {
+          if (strict && /^[A-Za-z_][\w-]*\s*:/.test(rest)) {
+            throw new Error('Use an inline YAML map or put the list hyphen on its own line.');
+          }
           arr.push(parseScalar(rest));
           idx++;
         }
@@ -285,6 +298,7 @@ export function parseSimpleYaml(text) {
       const line = lines[idx];
       if (line.indent < blockIndent) break;
       if (line.indent > blockIndent) {
+        if (strict) throw new Error('Unsupported YAML indentation or multiline scalar.');
         idx++;
         continue;
       }
@@ -292,12 +306,14 @@ export function parseSimpleYaml(text) {
 
       const colonIdx = line.content.indexOf(':');
       if (colonIdx === -1) {
+        if (strict) throw new Error('Expected a YAML mapping entry.');
         idx++;
         continue;
       }
 
       const key = line.content.slice(0, colonIdx).trim().replace(/^['"]|['"]$/g, '');
       const rest = line.content.slice(colonIdx + 1).trim();
+      if (strict && Object.hasOwn(obj, key)) throw new Error(`Duplicate YAML key: ${key}`);
 
       if (!isSafeObjectKey(key)) {
         if (rest === '' && idx + 1 < lines.length && lines[idx + 1].indent > blockIndent) {
@@ -327,7 +343,9 @@ export function parseSimpleYaml(text) {
     return { value: obj, nextIndex: idx };
   }
 
-  return parseBlock(0, 0).value;
+  const parsed = parseBlock(0, 0);
+  if (strict && parsed.nextIndex !== lines.length) throw new Error('Unsupported trailing YAML content.');
+  return parsed.value;
 }
 
 function deepMerge(target, source) {
@@ -358,13 +376,31 @@ function parseBoolOverride(raw) {
   const normalized = String(raw).trim().toLowerCase();
   if (normalized === 'true' || normalized === '1') return true;
   if (normalized === 'false' || normalized === '0') return false;
-  return undefined;
+  throw new Error('Invalid boolean configuration override; use true/false or 1/0.');
 }
 
 function parseNumberOverride(raw) {
   if (raw === undefined || raw === null || String(raw).trim() === '') return undefined;
   const num = Number(String(raw).trim());
-  return Number.isFinite(num) && num >= 0 ? num : undefined;
+  if (!Number.isFinite(num) || num < 0) throw new Error('Invalid numeric configuration override; use a finite nonnegative number.');
+  return num;
+}
+
+function validateConfigTypes(value, defaults, prefix = '') {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${prefix || 'Configuration'} must be a mapping.`);
+  }
+  for (const [key, expected] of Object.entries(defaults)) {
+    if (!Object.hasOwn(value, key)) continue;
+    const actual = value[key], name = prefix ? `${prefix}.${key}` : key;
+    if (Array.isArray(expected)) {
+      if (!Array.isArray(actual)) throw new Error(`${name} must be an array.`);
+    } else if (typeof expected === 'object') {
+      validateConfigTypes(actual, expected, name);
+    } else if (typeof actual !== typeof expected || (typeof actual === 'number' && (!Number.isFinite(actual) || actual < 0))) {
+      throw new Error(`${name} must be ${typeof expected === 'number' ? 'a finite nonnegative number' : `a ${typeof expected}`}.`);
+    }
+  }
 }
 
 export function loadConfig(options = {}, maybeEnv = undefined) {
@@ -377,9 +413,14 @@ export function loadConfig(options = {}, maybeEnv = undefined) {
 
   let config = structuredClone(DEFAULT_CONFIG);
 
-  if (fs.existsSync(resolvedPath)) {
-    const rawText = fs.readFileSync(resolvedPath, 'utf8');
-    const parsed = parseSimpleYaml(rawText);
+  let rawText;
+  try { rawText = fs.readFileSync(resolvedPath, 'utf8'); }
+  catch (error) {
+    if (error.code !== 'ENOENT' || configPath) throw new Error(`Cannot read Lights On configuration: ${resolvedPath}`, { cause: error });
+  }
+  if (rawText !== undefined) {
+    const parsed = parseSimpleYaml(rawText, { strict: true });
+    validateConfigTypes(parsed, DEFAULT_CONFIG);
     config = deepMerge(config, parsed);
   }
 
@@ -415,6 +456,8 @@ export function loadConfig(options = {}, maybeEnv = undefined) {
   if (env.LIGHTS_ON_PROVIDER && env.LIGHTS_ON_PROVIDER.trim() !== '') {
     config.engine.provider = env.LIGHTS_ON_PROVIDER.trim();
   }
+  if (env.LIGHTS_ON_COPILOT_BACKEND !== undefined) config.engine.copilot_backend = env.LIGHTS_ON_COPILOT_BACKEND.trim();
+  if (!['cli', 'sdk'].includes(config.engine.copilot_backend)) throw new Error('engine.copilot_backend must be cli or sdk.');
 
   if (env.LIGHTS_ON_MODEL && env.LIGHTS_ON_MODEL.trim() !== '') {
     config.engine.models.default = env.LIGHTS_ON_MODEL.trim();
@@ -485,6 +528,7 @@ export function loadConfig(options = {}, maybeEnv = undefined) {
     config.upstream.max_items_per_run = upstreamMaxItems;
   }
 
+  validateConfigTypes(config, DEFAULT_CONFIG);
   return config;
 }
 
@@ -500,14 +544,13 @@ export function resolveProvider(config, env = process.env, tier = 'default') {
   if (!configuredProvider || configuredProvider === 'auto') {
     if (availableProviders.length > 0) {
       provider = availableProviders[0];
-    } else if (env.GITHUB_TOKEN && String(env.GITHUB_TOKEN).trim() !== '') {
-      provider = 'copilot';
     } else {
       provider = 'copilot';
     }
   } else {
     provider = configuredProvider;
   }
+  if (!PROVIDER_ORDER.includes(provider)) throw new Error(`Unsupported provider: ${provider}`);
 
   const reasoningModel = config?.engine?.models?.reasoning?.trim();
   const defaultModel = config?.engine?.models?.default?.trim();
@@ -528,15 +571,18 @@ export function resolveProvider(config, env = process.env, tier = 'default') {
   }
 
   const apiKeyEnvVar = PROVIDER_ENV_VARS[provider] || 'COPILOT_GITHUB_TOKEN';
-  const isConfigured =
-    availableProviders.includes(provider) ||
-    (provider === 'copilot' && Boolean(env.GITHUB_TOKEN && String(env.GITHUB_TOKEN).trim() !== ''));
+  const isConfigured = availableProviders.includes(provider);
 
   const configuredFallbacks = Array.isArray(config?.engine?.fallback_providers)
     ? config.engine.fallback_providers
     : [];
   const fallbackProviders = configuredFallbacks.length > 0
-    ? configuredFallbacks.filter((p) => p !== provider)
+    ? [...new Set(configuredFallbacks.map((value) => {
+        if (typeof value !== 'string' || !PROVIDER_ORDER.includes(value.trim().toLowerCase())) {
+          throw new Error('Unsupported fallback provider.');
+        }
+        return value.trim().toLowerCase();
+      }))].filter((p) => p !== provider)
     : availableProviders.filter((p) => p !== provider);
 
   return {
@@ -562,6 +608,7 @@ function runCli() {
       `model=${sanitizeGitHubOutputValue(defaultResolution.model)}`,
       `reasoning_model=${sanitizeGitHubOutputValue(reasoningResolution.model)}`,
       `reasoningModel=${sanitizeGitHubOutputValue(reasoningResolution.model)}`,
+      `copilot_backend=${config.engine.copilot_backend}`,
       `mode=${sanitizeGitHubOutputValue(config.autonomy.mode)}`,
       `allow_external_pr_automerge=${Boolean(config.autonomy.allow_external_pr_automerge)}`,
       `allowExternalPrAutomerge=${Boolean(config.autonomy.allow_external_pr_automerge)}`,

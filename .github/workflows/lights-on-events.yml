@@ -3,24 +3,27 @@ name: Lights On - Issue & Comment Responder
 on:
   issues:
     types: [opened, reopened, labeled]
-  issue_comment:
+  # Default-branch controller; comments are data, admission is checked, and model commands stay in offline workers.
+  issue_comment: # zizmor: ignore[dangerous-triggers]
     types: [created]
 
 concurrency:
   group: lights-on-maintenance-budget-${{ github.repository }}
   cancel-in-progress: false
 
-permissions:
-  contents: write
-  issues: write
-  pull-requests: write
+permissions: {}
 
 jobs:
   respond:
     name: Triage & Respond to Issue or Comment
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # Push generated fix branches through the scoped Git helper.
+      issues: write # Apply issue controls, labels and responses.
+      pull-requests: write # Open candidate PRs and apply PR-comment controls.
     timeout-minutes: 25
     if: >-
+      github.repository != 'scovetta/lights-on' &&
       vars.LIGHTS_ON_ENABLED != 'false' &&
       (
         github.actor != 'github-actions[bot]' &&
@@ -37,11 +40,13 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Node.js 24
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
+          package-manager-cache: false
 
       - name: Load Lights On configuration
         id: config
@@ -172,9 +177,8 @@ jobs:
       - name: Run Lights On Agent
         id: agent
         if: steps.config.outputs.enabled != 'false' && steps.authorize.outputs.should_run_agent == 'true'
-        uses: ./.github/actions/lights-on-agent
+        uses: $/.github/actions/lights-on-agent
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -221,6 +225,10 @@ jobs:
           }
 
           const result = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
+          if (result.status !== 'completed' || result.dry_run) {
+            reportWorkflowEvent({ title: 'Issue publication skipped', message: 'No completed live agent result is available.' });
+            process.exit(0);
+          }
           const issueNumber = String(process.env.ISSUE_NUMBER || '').trim();
           if (!issueNumber || !/^\d+$/.test(issueNumber)) {
             console.log('No valid issue number present in environment; skipping.');
@@ -237,7 +245,8 @@ jobs:
             try {
               execFileSync('gh', ['issue', 'edit', issueNumber, '--repo', installedRepo, '--add-label', labelsToAdd.join(',')], { stdio: 'inherit' });
             } catch (err) {
-              console.warn('Warning: failed to add labels:', err.message);
+              reportWorkflowEvent({ level: 'error', title: 'Issue label update failed', message: err.message });
+              throw err;
             }
           }
 
@@ -245,7 +254,8 @@ jobs:
             try {
               execFileSync('gh', ['issue', 'edit', issueNumber, '--repo', installedRepo, '--remove-label', labelsToRemove.join(',')], { stdio: 'inherit' });
             } catch (err) {
-              console.warn('Warning: failed to remove labels:', err.message);
+              reportWorkflowEvent({ level: 'error', title: 'Issue label cleanup failed', message: err.message });
+              throw err;
             }
           }
 

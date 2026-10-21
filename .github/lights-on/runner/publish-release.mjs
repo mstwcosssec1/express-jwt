@@ -3,13 +3,26 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, sanitizeGitHubOutputValue } from './load-config.mjs';
-import { readCurrentManifestVersion } from './prepare-release.mjs';
+import { readCurrentManifestVersion, tomlPackageSection } from './prepare-release.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 
 const SAFE_SEMVER_REGEX = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/;
 const SAFE_PACKAGE_NAME_REGEX = /^(@[a-z0-9._-]+\/)?[a-z0-9._/-]+$/i;
 const SAFE_MANIFEST_FILE_REGEX = /^[A-Za-z0-9._-]+$/;
+
+export function partitionReleaseUploads(ecosystems, { hasNpmToken = false, hasPypiToken = false, provenance = true } = {}) {
+  if (!Array.isArray(ecosystems) || ecosystems.some((name) => !['npm', 'pypi', 'crates', 'nuget', 'rubygems'].includes(name)) ||
+      [hasNpmToken, hasPypiToken, provenance].some((value) => typeof value !== 'boolean')) {
+    throw new Error('Invalid release upload authentication inputs.');
+  }
+  const result = { oidc: [], token: [] };
+  for (const ecosystem of new Set(ecosystems)) {
+    const needsOidc = ecosystem === 'npm' ? !hasNpmToken || provenance : ecosystem === 'pypi' && !hasPypiToken;
+    result[needsOidc ? 'oidc' : 'token'].push(ecosystem);
+  }
+  return result;
+}
 
 /**
  * Extract release metadata from a Release PR's body (`<!-- lights-on-release: {...} -->`) or title (`chore(release): vX.Y.Z`).
@@ -55,25 +68,24 @@ export function detectPublishTargets(repoRoot = process.cwd()) {
   // 1. npm (package.json with private !== true)
   const pkgPath = path.join(absRoot, 'package.json');
   if (fs.existsSync(pkgPath)) {
-    try {
-      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-      if (pkg.name && pkg.private !== true) {
-        targets.push({
-          ecosystem: 'npm',
-          name: pkg.name,
-          version: String(pkg.version || '').replace(/^v/, ''),
-          manifest: 'package.json'
-        });
-      }
-    } catch {}
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+    if (pkg.name && pkg.private !== true) {
+      targets.push({
+        ecosystem: 'npm',
+        name: pkg.name,
+        version: String(pkg.version || '').replace(/^v/, ''),
+        manifest: 'package.json'
+      });
+    }
   }
 
   // 2. PyPI (pyproject.toml or setup.py)
   const pyprojectPath = path.join(absRoot, 'pyproject.toml');
   if (fs.existsSync(pyprojectPath)) {
     const content = fs.readFileSync(pyprojectPath, 'utf8');
-    if (/\[project\]|\[tool\.poetry\]/i.test(content)) {
-      const nameMatch = content.match(/^\s*name\s*=\s*["']([^"']+)["']/m);
+    const section = tomlPackageSection(content, ['project', 'tool.poetry']);
+    if (section) {
+      const nameMatch = section.text.match(/^\s*name\s*=\s*["']([^"']+)["']/m);
       targets.push({
         ecosystem: 'pypi',
         name: nameMatch ? nameMatch[1] : path.basename(absRoot),
@@ -92,8 +104,9 @@ export function detectPublishTargets(repoRoot = process.cwd()) {
   const cargoPath = path.join(absRoot, 'Cargo.toml');
   if (fs.existsSync(cargoPath)) {
     const content = fs.readFileSync(cargoPath, 'utf8');
-    if (/\[package\]/i.test(content) && !/^\s*publish\s*=\s*false/m.test(content)) {
-      const nameMatch = content.match(/^\s*name\s*=\s*["']([^"']+)["']/m);
+    const section = tomlPackageSection(content, ['package']);
+    if (section && !/^\s*publish\s*=\s*false/m.test(section.text)) {
+      const nameMatch = section.text.match(/^\s*name\s*=\s*["']([^"']+)["']/m);
       targets.push({
         ecosystem: 'crates',
         name: nameMatch ? nameMatch[1] : path.basename(absRoot),
@@ -103,27 +116,24 @@ export function detectPublishTargets(repoRoot = process.cwd()) {
   }
 
   // 4. NuGet (*.csproj without <IsPackable>false</IsPackable>)
-  try {
-    const entries = fs.readdirSync(absRoot);
-    for (const entry of entries) {
-      if (entry.endsWith('.csproj')) {
-        const content = fs.readFileSync(path.join(absRoot, entry), 'utf8');
-        if (!/<IsPackable>\s*false\s*<\/IsPackable>/i.test(content)) {
-          targets.push({
-            ecosystem: 'nuget',
-            name: entry.replace(/\.csproj$/i, ''),
-            manifest: entry
-          });
-        }
-      } else if (entry.endsWith('.gemspec')) {
+  for (const entry of fs.readdirSync(absRoot)) {
+    if (entry.endsWith('.csproj')) {
+      const content = fs.readFileSync(path.join(absRoot, entry), 'utf8');
+      if (!/<IsPackable>\s*false\s*<\/IsPackable>/i.test(content)) {
         targets.push({
-          ecosystem: 'rubygems',
-          name: entry.replace(/\.gemspec$/i, ''),
+          ecosystem: 'nuget',
+          name: entry.replace(/\.csproj$/i, ''),
           manifest: entry
         });
       }
+    } else if (entry.endsWith('.gemspec')) {
+      targets.push({
+        ecosystem: 'rubygems',
+        name: entry.replace(/\.gemspec$/i, ''),
+        manifest: entry
+      });
     }
-  } catch {}
+  }
 
   // 5. Go module (go.mod)
   const goModPath = path.join(absRoot, 'go.mod');
@@ -269,7 +279,7 @@ export function buildPublishCommands(
 }
 
 /**
- * Verify manifest version matches expected release version and execute or simulate publishing.
+ * Build a release plan. Credentialed build-and-publish execution is disabled.
  */
 export function publishRelease({
   repoRoot = process.cwd(),

@@ -2,19 +2,31 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { stripVTControlCharacters } from 'node:util';
 import { createUsageAccumulator, normalizeCopilotUsage } from './usage.mjs';
+import { copilotFailureDiagnostic, parseCopilotToolSelection } from './copilot-inference.mjs';
+import { createCopilotSdkCompletion } from './copilot-sdk-completion.mjs';
 
 const COPILOT_RESPONSE_ATTEMPTS = 3;
 const COPILOT_COMPLETION_TIMEOUT_MS = 120000;
+export const COPILOT_CLI_VERSION = '1.0.98';
 
 // Only inference occurs here. Repository tools are dispatched by the controller.
-export function copilotInferenceSpec(home, model) {
+export function copilotInferenceSpec(home, model, env = {}) {
+  let loader;
+  if (env.LIGHTS_ON_COPILOT_CLI_DIR) {
+    if (!path.isAbsolute(env.LIGHTS_ON_COPILOT_CLI_DIR)) throw new Error('Copilot CLI tools directory must be absolute.');
+    const directory = path.join(env.LIGHTS_ON_COPILOT_CLI_DIR, 'node_modules', '@github', 'copilot');
+    const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'package.json'), 'utf8'));
+    if (manifest.version !== COPILOT_CLI_VERSION || manifest.bin?.copilot !== 'npm-loader.js') {
+      throw new Error(`Prepared Copilot CLI ${COPILOT_CLI_VERSION} is required.`);
+    }
+    loader = path.join(directory, 'npm-loader.js');
+  }
   return {
-    cmd: 'copilot',
+    cmd: loader ? process.execPath : 'copilot',
     // In 1.0.98 an empty allowlist means "no filter". This deliberately unmatched
     // name keeps the allowlist nonempty while exposing no built-in tools.
-    args: ['--available-tools=lights_on_no_builtin_tools', '--disable-builtin-mcps', '--no-custom-instructions',
+    args: [...(loader ? [loader] : []), '--available-tools=lights_on_no_builtin_tools', '--disable-builtin-mcps', '--no-custom-instructions',
       '--no-ask-user', '--no-auto-update', '--deny-tool', 'shell',
       '--deny-tool', 'write', '--deny-tool', 'url', '--silent',
       '--model', model, '--log-level', 'none',
@@ -27,66 +39,15 @@ export function copilotInferenceSpec(home, model) {
   };
 }
 
-function copilotFailureDiagnostic(proc, env) {
-  let text = stripVTControlCharacters([proc.error?.message, proc.stderr || proc.stdout].filter(Boolean).join(' '));
-  const secrets = Object.entries(env)
-    .filter(([key, value]) => /token|secret|password|api_?key|credential|authorization/i.test(key) &&
-      typeof value === 'string' && value.length > 0)
-    .flatMap(([, value]) => [value, encodeURIComponent(value), JSON.stringify(value).slice(1, -1)])
-    .sort((a, b) => b.length - a.length);
-  for (const secret of secrets) text = text.split(secret).join('[REDACTED]');
-  text = text.replace(/\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+)\b/g, '[REDACTED]')
-    .replace(/[\x00-\x1f\x7f-\x9f]+/g, ' ').trim();
-  return text.length > 2000 ? `${text.slice(0, 2000)} [truncated]` : text;
-}
-
-function matchesToolParameters(value, schema = {}) {
-  if (schema.enum && !schema.enum.includes(value)) return false;
-  switch (schema.type) {
-    case 'object':
-      return value !== null && typeof value === 'object' && !Array.isArray(value) &&
-        (schema.required || []).every((key) => Object.hasOwn(value, key)) &&
-        Object.entries(schema.properties || {}).every(([key, property]) =>
-          !Object.hasOwn(value, key) || matchesToolParameters(value[key], property));
-    case 'array':
-      return Array.isArray(value) && value.every((item) => matchesToolParameters(item, schema.items));
-    case 'integer':
-      return Number.isSafeInteger(value);
-    case 'number':
-      return typeof value === 'number' && Number.isFinite(value);
-    case 'string':
-    case 'boolean':
-      return typeof value === schema.type;
-    default:
-      return true;
-  }
-}
-
-function parseCopilotToolSelection(output, tools) {
-  const text = String(output || '').trim();
-  const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  let call;
-  try {
-    call = JSON.parse(fenced ? fenced[1] : text);
-  } catch {
-    return { error: 'Expected one JSON object, not XML invocations, prose, or multiple tool calls.' };
-  }
-  if (!call || Array.isArray(call) || typeof call !== 'object') {
-    return { error: 'Expected a JSON object containing name and arguments.' };
-  }
-  const tool = tools.find((tool) => tool.function.name === call.name);
-  if (!tool) return { error: 'The tool name was not in the supplied tool list.' };
-  if (!call.arguments || typeof call.arguments !== 'object' || Array.isArray(call.arguments) ||
-      !matchesToolParameters(call.arguments, tool.function.parameters)) {
-    return { error: 'Tool arguments must be an object matching the supplied parameter types and required fields.' };
-  }
-  return { call };
-}
-
 export function createProviderCompletion({ provider, model, env, fetchImpl = globalThis.fetch, spawnImpl = spawnSync,
-  maxInputBytes = 262144, maxOutputTokens = 8192, beforeModelCall = () => {} }) {
+  maxInputBytes = 262144, maxOutputTokens = 8192, beforeModelCall = () => {},
+  copilotBackend = 'cli', copilotSdkLoader }) {
   if (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 1 ||
       !Number.isSafeInteger(maxInputBytes) || maxInputBytes < 1) throw new Error('Invalid inference size limits.');
+  if (!['cli', 'sdk'].includes(copilotBackend)) throw new Error('Unknown Copilot backend; expected cli or sdk.');
+  if (provider === 'copilot' && copilotBackend === 'sdk') {
+    return createCopilotSdkCompletion({ model, env, maxInputBytes, maxOutputTokens, beforeModelCall, sdkLoader: copilotSdkLoader });
+  }
   const openAiHistory = [];
   let seenMessages = 0;
   const post = async (url, headers, body) => {
@@ -158,7 +119,7 @@ export function createProviderCompletion({ provider, model, env, fetchImpl = glo
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lights-on-inference-'));
     const usage = createUsageAccumulator();
     try {
-      const spec = copilotInferenceSpec(home, model);
+      const spec = copilotInferenceSpec(home, model, env);
       const usageFile = spec.args[spec.args.indexOf('--usage-output-file') + 1];
       const formatInstruction = [
         'You are a JSON tool-selection API, not a tool executor. All built-in tools are disabled.',

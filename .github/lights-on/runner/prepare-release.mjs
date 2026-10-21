@@ -30,7 +30,34 @@ export function compareSemver(a, b) {
   const preB = mb[4] || '';
   if (!preA && preB) return 1;
   if (preA && !preB) return -1;
-  return preA.localeCompare(preB);
+  const left = preA.split('.');
+  const right = preB.split('.');
+  for (let i = 0; i < Math.max(left.length, right.length); i++) {
+    if (left[i] === right[i]) continue;
+    if (left[i] === undefined) return -1;
+    if (right[i] === undefined) return 1;
+    const numericLeft = /^\d+$/.test(left[i]);
+    const numericRight = /^\d+$/.test(right[i]);
+    if (numericLeft && numericRight) {
+      const a = BigInt(left[i]), b = BigInt(right[i]);
+      if (a !== b) return a > b ? 1 : -1;
+    } else if (numericLeft !== numericRight) return numericLeft ? -1 : 1;
+    else return left[i] > right[i] ? 1 : -1;
+  }
+  return 0;
+}
+
+// Bound literal metadata reads/edits to a table, including when an array table follows it.
+export function tomlPackageSection(text, names) {
+  const headings = [...text.matchAll(/^[ \t]*\[\[?([^\]\r\n]+)\]\]?[ \t]*(?:#[^\r\n]*)?\r?$/gm)];
+  for (const name of names) {
+    const index = headings.findIndex((entry) => entry[1].trim() === name && !entry[0].trimStart().startsWith('[['));
+    if (index < 0) continue;
+    const start = headings[index].index + headings[index][0].length;
+    const end = headings[index + 1]?.index ?? text.length;
+    return { start, end, text: text.slice(start, end) };
+  }
+  return null;
 }
 
 /**
@@ -118,7 +145,7 @@ export function analyzeCommitsForRelease(
 
     if (!firstLine) continue;
 
-    // Ignore prior automated release commits or pure CI/test/doc commits
+    // A prior release commit must not trigger the next release.
     if (/^chore\(release\):/i.test(firstLine) || /^release:/i.test(firstLine)) {
       continue;
     }
@@ -213,53 +240,39 @@ export function analyzeCommitsForRelease(
 export function readCurrentManifestVersion(repoRoot = process.cwd()) {
   const absRoot = path.resolve(repoRoot);
 
-  // 1. package.json
   const pkgPath = path.join(absRoot, 'package.json');
   if (fs.existsSync(pkgPath)) {
-    try {
-      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-      if (pkg.version && SEMVER_REGEX.test(pkg.version)) {
-        return String(pkg.version).replace(/^v/, '');
-      }
-    } catch {}
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+    if (pkg.version && SEMVER_REGEX.test(pkg.version)) {
+      return String(pkg.version).replace(/^v/, '');
+    }
   }
 
-  // 2. pyproject.toml
   const pyprojectPath = path.join(absRoot, 'pyproject.toml');
   if (fs.existsSync(pyprojectPath)) {
     const content = fs.readFileSync(pyprojectPath, 'utf8');
-    const sectionMatch = content.match(/\[(?:project|tool\.poetry)\][\s\S]*?(?=\r?\n\[|$)/);
-    const targetBlock = sectionMatch ? sectionMatch[0] : content;
+    const targetBlock = tomlPackageSection(content, ['project', 'tool.poetry'])?.text || '';
     const m = targetBlock.match(/^\s*version\s*=\s*["']([^"']+)["']/m);
     if (m && SEMVER_REGEX.test(m[1])) return m[1].replace(/^v/, '');
   }
 
-  // 3. Cargo.toml
   const cargoPath = path.join(absRoot, 'Cargo.toml');
   if (fs.existsSync(cargoPath)) {
     const content = fs.readFileSync(cargoPath, 'utf8');
-    const sectionMatch = content.match(/\[package\][\s\S]*?(?=\r?\n\[|$)/);
-    const targetBlock = sectionMatch ? sectionMatch[0] : content;
+    const targetBlock = tomlPackageSection(content, ['package'])?.text || '';
     const m = targetBlock.match(/^\s*version\s*=\s*["']([^"']+)["']/m);
     if (m && SEMVER_REGEX.test(m[1])) return m[1].replace(/^v/, '');
   }
 
-  // 4. *.csproj or *.gemspec in root
-  try {
-    const entries = fs.readdirSync(absRoot);
-    for (const entry of entries) {
-      if (entry.endsWith('.csproj')) {
-        const content = fs.readFileSync(path.join(absRoot, entry), 'utf8');
-        const m = content.match(/<Version>([^<]+)<\/Version>/i);
-        if (m && SEMVER_REGEX.test(m[1].trim())) return m[1].trim().replace(/^v/, '');
-      }
-      if (entry.endsWith('.gemspec')) {
-        const content = fs.readFileSync(path.join(absRoot, entry), 'utf8');
-        const m = content.match(/\.version\s*=\s*["']([^"']+)["']/);
-        if (m && SEMVER_REGEX.test(m[1].trim())) return m[1].trim().replace(/^v/, '');
-      }
+  for (const entry of fs.readdirSync(absRoot)) {
+    const pattern = entry.endsWith('.csproj') ? /<Version>([^<]+)<\/Version>/i :
+      entry.endsWith('.gemspec') ? /\.version\s*=\s*["']([^"']+)["']/ : null;
+    if (!pattern) continue;
+    const match = fs.readFileSync(path.join(absRoot, entry), 'utf8').match(pattern);
+    if (match && SEMVER_REGEX.test(match[1].trim())) {
+      return match[1].trim().replace(/^v/, '');
     }
-  } catch {}
+  }
 
   return '0.1.0';
 }
@@ -274,103 +287,52 @@ export function updateManifestVersions(repoRoot = process.cwd(), newVersion) {
     throw new Error(`Refusing to write invalid SemVer version "${newVersion}" to manifests`);
   }
 
-  const updatedFiles = [];
+  const updates = new Map();
 
-  // 1. package.json & package-lock.json
   const pkgPath = path.join(absRoot, 'package.json');
   if (fs.existsSync(pkgPath)) {
-    try {
-      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+    if (pkg.version !== cleanVersion) {
       pkg.version = cleanVersion;
-      fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n', 'utf8');
-      updatedFiles.push('package.json');
-    } catch {}
+      updates.set('package.json', JSON.stringify(pkg, null, 2) + '\n');
+    }
   }
 
   const pkgLockPath = path.join(absRoot, 'package-lock.json');
   if (fs.existsSync(pkgLockPath)) {
-    try {
-      const lock = JSON.parse(fs.readFileSync(pkgLockPath, 'utf8'));
-      lock.version = cleanVersion;
-      if (lock.packages && lock.packages[''] && typeof lock.packages[''] === 'object') {
-        lock.packages[''].version = cleanVersion;
-      }
-      fs.writeFileSync(pkgLockPath, JSON.stringify(lock, null, 2) + '\n', 'utf8');
-      updatedFiles.push('package-lock.json');
-    } catch {}
+    const lock = JSON.parse(fs.readFileSync(pkgLockPath, 'utf8'));
+    const changed = lock.version !== cleanVersion ||
+      (lock.packages?.[''] && lock.packages[''].version !== cleanVersion);
+    lock.version = cleanVersion;
+    if (lock.packages && lock.packages[''] && typeof lock.packages[''] === 'object') {
+      lock.packages[''].version = cleanVersion;
+    }
+    if (changed) updates.set('package-lock.json', JSON.stringify(lock, null, 2) + '\n');
   }
 
-  // 2. pyproject.toml
-  const pyprojectPath = path.join(absRoot, 'pyproject.toml');
-  if (fs.existsSync(pyprojectPath)) {
-    const content = fs.readFileSync(pyprojectPath, 'utf8');
-    let updated = content.replace(
-      /(\[(?:project|tool\.poetry)\][\s\S]*?^\s*version\s*=\s*["'])([^"']+)(["'])/m,
-      `$1${cleanVersion}$3`
-    );
-    if (updated === content) {
-      updated = content.replace(
-        /(^\s*version\s*=\s*["'])([^"']+)(["'])/m,
-        `$1${cleanVersion}$3`
-      );
-    }
+  for (const [name, sections] of [['pyproject.toml', ['project', 'tool.poetry']], ['Cargo.toml', ['package']]]) {
+    const file = path.join(absRoot, name);
+    if (!fs.existsSync(file)) continue;
+    const content = fs.readFileSync(file, 'utf8');
+    const section = tomlPackageSection(content, sections);
+    const pattern = /^([ \t]*version[ \t]*=[ \t]*["'])([^"'\r\n]+)(["'])/m;
+    if (!section || !pattern.test(section.text)) throw new Error(`${name} requires a literal package version for release preparation.`);
+    const body = section.text.replace(pattern, (_match, prefix, _version, suffix) => `${prefix}${cleanVersion}${suffix}`);
+    if (body !== section.text) updates.set(name, content.slice(0, section.start) + body + content.slice(section.end));
+  }
+
+  for (const entry of fs.readdirSync(absRoot)) {
+    const pattern = entry.endsWith('.csproj') ? /(<Version>)([^<]+)(<\/Version>)/i :
+      entry.endsWith('.gemspec') ? /(\.version\s*=\s*["'])([^"']+)(["'])/ : null;
+    if (!pattern) continue;
+    const content = fs.readFileSync(path.join(absRoot, entry), 'utf8');
+    const updated = content.replace(pattern, (_match, prefix, _version, suffix) => `${prefix}${cleanVersion}${suffix}`);
     if (updated !== content) {
-      fs.writeFileSync(pyprojectPath, updated, 'utf8');
-      updatedFiles.push('pyproject.toml');
+      updates.set(entry, updated);
     }
   }
-
-  // 3. Cargo.toml
-  const cargoPath = path.join(absRoot, 'Cargo.toml');
-  if (fs.existsSync(cargoPath)) {
-    const content = fs.readFileSync(cargoPath, 'utf8');
-    let updated = content.replace(
-      /(\[package\][\s\S]*?^\s*version\s*=\s*["'])([^"']+)(["'])/m,
-      `$1${cleanVersion}$3`
-    );
-    if (updated === content) {
-      updated = content.replace(
-        /(^\s*version\s*=\s*["'])([^"']+)(["'])/m,
-        `$1${cleanVersion}$3`
-      );
-    }
-    if (updated !== content) {
-      fs.writeFileSync(cargoPath, updated, 'utf8');
-      updatedFiles.push('Cargo.toml');
-    }
-  }
-
-  // 4. *.csproj and *.gemspec
-  try {
-    const entries = fs.readdirSync(absRoot);
-    for (const entry of entries) {
-      if (entry.endsWith('.csproj')) {
-        const fullPath = path.join(absRoot, entry);
-        const content = fs.readFileSync(fullPath, 'utf8');
-        const updated = content.replace(
-          /(<Version>)([^<]+)(<\/Version>)/i,
-          `$1${cleanVersion}$3`
-        );
-        if (updated !== content) {
-          fs.writeFileSync(fullPath, updated, 'utf8');
-          updatedFiles.push(entry);
-        }
-      } else if (entry.endsWith('.gemspec')) {
-        const fullPath = path.join(absRoot, entry);
-        const content = fs.readFileSync(fullPath, 'utf8');
-        const updated = content.replace(
-          /(\.version\s*=\s*["'])([^"']+)(["'])/,
-          `$1${cleanVersion}$3`
-        );
-        if (updated !== content) {
-          fs.writeFileSync(fullPath, updated, 'utf8');
-          updatedFiles.push(entry);
-        }
-      }
-    }
-  } catch {}
-
-  return updatedFiles;
+  for (const [name, content] of updates) fs.writeFileSync(path.join(absRoot, name), content, 'utf8');
+  return [...updates.keys()];
 }
 
 /**
@@ -472,8 +434,8 @@ export function prepareRelease({
         stdio: ['ignore', 'pipe', 'ignore']
       });
       tagList = rawTags.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-    } catch {
-      tagList = [];
+    } catch (error) {
+      throw new Error('Cannot read release tags; refusing to assume this is an initial release.', { cause: error });
     }
   }
 
@@ -489,14 +451,14 @@ export function prepareRelease({
   if (!Array.isArray(commitList)) {
     try {
       const range = latestTagObj ? `${latestTagObj.tag}..HEAD` : 'HEAD';
-      const rawLog = execFileSync('git', ['log', range, '--no-merges', '--pretty=format:%s'], {
+      const rawLog = execFileSync('git', ['log', range, '--no-merges', '--pretty=format:%B%x00'], {
         cwd: repoRoot,
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore']
       });
-      commitList = rawLog.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-    } catch {
-      commitList = [];
+      commitList = rawLog.split('\0').map((s) => s.trim()).filter(Boolean);
+    } catch (error) {
+      throw new Error('Cannot read release commit history; refusing to report no releasable changes.', { cause: error });
     }
   }
 

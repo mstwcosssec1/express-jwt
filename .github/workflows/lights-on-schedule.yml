@@ -36,18 +36,19 @@ concurrency:
   group: lights-on-maintenance-budget-${{ github.repository }}
   cancel-in-progress: false
 
-permissions:
-  contents: write
-  issues: write
-  pull-requests: write
-  security-events: write
+permissions: {}
 
 jobs:
   maintenance:
     name: Autonomous Scheduled Maintenance
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # Push generated maintenance and release branches.
+      issues: write # Recover issue state and publish tracking issues and labels.
+      pull-requests: write # Inspect existing PRs and publish maintenance proposals.
     timeout-minutes: 45
     if: >-
+      github.repository != 'scovetta/lights-on' &&
       vars.LIGHTS_ON_ENABLED != 'false' &&
       (inputs.task != 'migration' || github.ref_name == github.event.repository.default_branch)
     steps:
@@ -55,11 +56,13 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Node.js 24
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
+          package-manager-cache: false
 
       - name: Load Lights On configuration
         id: config
@@ -130,9 +133,8 @@ jobs:
         if: >-
           steps.config.outputs.enabled != 'false' &&
           (steps.threat-model-check.outputs.exists == 'false' || inputs.task == 'bootstrap')
-        uses: ./.github/actions/lights-on-agent
+        uses: $/.github/actions/lights-on-agent
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -161,7 +163,7 @@ jobs:
             git checkout -B "$branch"
             git add THREAT_MODEL.md threat-model.yaml threat-model.json 2>/dev/null || git add THREAT_MODEL.md
             git commit -m "docs(security): bootstrap and sync THREAT_MODEL.md"
-            git push -u origin "$branch" --force
+            node .github/lights-on/runner/github-io.mjs git-push -u origin "$branch" --force
             node .github/lights-on/runner/publish-pr.mjs \
               --title "docs(security): bootstrap and sync THREAT_MODEL.md" \
               --body "Automated threat model generation grounded in \`alpha-omega-security/threat-model\` (§1.1–§1.19)." \
@@ -185,9 +187,8 @@ jobs:
         if: >-
           steps.config.outputs.enabled != 'false' &&
           (inputs.task == 'all' || inputs.task == 'security' || inputs.task == '')
-        uses: ./.github/actions/lights-on-agent
+        uses: $/.github/actions/lights-on-agent
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -214,7 +215,7 @@ jobs:
             git checkout -B "$branch"
             git add -A
             git commit -m "fix(security): automated vulnerability remediation"
-            git push -u origin "$branch" --force
+            node .github/lights-on/runner/github-io.mjs git-push -u origin "$branch" --force
             node .github/lights-on/runner/publish-pr.mjs \
               --title "fix(security): automated vulnerability remediation" \
               --body "Automated security vulnerability remediation verified against OSV.dev and \`THREAT_MODEL.md\`." \
@@ -226,8 +227,8 @@ jobs:
             node .github/lights-on/runner/workflow-report.mjs --title "Security publication skipped" --message "No security remediation changes were produced; no PR was published."
           fi
 
-      # Step D1 selects one bounded work item; security fixes belong to Step C.
-      - name: Step D1 — Select dependency work
+      # Step D selects one bounded work item; security fixes belong to Step C.
+      - name: Step D — Select dependency work
         id: dependency-selection
         if: >-
           steps.config.outputs.enabled != 'false' &&
@@ -240,12 +241,11 @@ jobs:
           MIGRATION_PLAN_ID: ${{ inputs.migration_plan }}
         run: node .github/lights-on/runner/dependency-stage.mjs --select
 
-      - name: Step D2 — Generate candidate or read-only migration plan
+      - name: Step E — Generate and validate dependency candidate or plan
         id: dependency-agent
         if: steps.config.outputs.enabled != 'false' && steps.dependency-selection.outputs.ready == 'true'
-        uses: ./.github/actions/lights-on-agent
+        uses: $/.github/actions/lights-on-agent
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -257,7 +257,7 @@ jobs:
           dependency_selection_file: /tmp/lights-on-dependency-selection.json
           output_file: /tmp/lights-on-deps-result.json
 
-      - name: Step D3 — Publish validated candidate or track blocker
+      - name: Step F — Publish dependency proposal or record blocker
         if: steps.config.outputs.enabled != 'false' && steps.dependency-selection.outputs.ready == 'true' && steps.dependency-agent.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -266,7 +266,7 @@ jobs:
           DEPENDENCY_RESULT: /tmp/lights-on-deps-result.json
         run: node .github/lights-on/runner/dependency-stage.mjs --publish
 
-      - name: Step D4 — Propose configured CI and build toolchain maintenance
+      - name: Step G — Maintain toolchains and CI runtimes
         if: >-
           steps.config.outputs.enabled != 'false' &&
           (inputs.task == 'all' || inputs.task == 'dependencies' || inputs.task == 'toolchains' || inputs.task == '')
@@ -275,14 +275,13 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
         run: node .github/lights-on/runner/maintain-toolchains.mjs --publish
 
-      # Step E — Documentation Clarification & Actionable Issue Fixes (docs-clarifier / issue-responder)
-      - name: Step E (1) — Documentation Clarification (docs-clarifier)
+      # Step H — Documentation Clarification & Actionable Issue Fixes (docs-clarifier / issue-responder)
+      - name: Step H — Clarify documentation (docs-clarifier)
         if: >-
           steps.config.outputs.enabled != 'false' &&
           (inputs.task == 'all' || inputs.task == 'docs' || inputs.task == 'issues' || inputs.task == '')
-        uses: ./.github/actions/lights-on-agent
+        uses: $/.github/actions/lights-on-agent
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -310,7 +309,7 @@ jobs:
             git checkout -B "$branch"
             git add -A
             git commit -m "docs: clarify recurring questions from issue tracker"
-            git push -u origin "$branch" --force
+            node .github/lights-on/runner/github-io.mjs git-push -u origin "$branch" --force
             node .github/lights-on/runner/publish-pr.mjs \
               --title "docs: clarify recurring questions from issue tracker" \
               --body "Automated documentation improvements grounded in recent user questions." \
@@ -334,14 +333,13 @@ jobs:
           count=$(node -e 'const fs=require("node:fs"); const a=JSON.parse(fs.readFileSync("/tmp/lights-on-actionable-issues.json","utf8")); console.log(Array.isArray(a)?a.length:0);')
           echo "count=$count" >> "$GITHUB_OUTPUT"
 
-      - name: Step E (2) — Process Open Actionable Issues (issue-responder)
+      - name: Respond to open actionable issues (issue-responder)
         if: >-
           steps.config.outputs.enabled != 'false' &&
           (inputs.task == 'all' || inputs.task == 'docs' || inputs.task == 'issues' || inputs.task == 'upstream' || inputs.task == '') &&
           steps.actionable-issues.outputs.count != '0'
-        uses: ./.github/actions/lights-on-agent
+        uses: $/.github/actions/lights-on-agent
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -407,15 +405,13 @@ jobs:
             reportWorkflowEvent({ title: 'Issue-fix publication skipped', message: 'No actionable-issue changes were produced; no PR was published.' });
           }
 
-          try {
-            execFileSync('git', ['checkout', defaultBranch], { stdio: 'ignore' });
-            execFileSync('git', ['checkout', '--', '.'], { stdio: 'ignore' });
-            execFileSync('git', ['clean', '-fd'], { stdio: 'ignore' });
-          } catch {}
+          execFileSync('git', ['checkout', defaultBranch], { stdio: 'ignore' });
+          execFileSync('git', ['checkout', '--', '.'], { stdio: 'ignore' });
+          execFileSync('git', ['clean', '-fd'], { stdio: 'ignore' });
           EOF
 
-      # Step F — Automated Release Preparation (patch/minor version bump + CHANGELOG.md + Release PR)
-      - name: Step F — Prepare Release PR if releasable commits accumulated
+      # Step I — Automated Release Preparation (patch/minor version bump + CHANGELOG.md + Release PR)
+      - name: Step I — Prepare release PR
         if: >-
           steps.config.outputs.enabled != 'false' &&
           steps.config.outputs.releaseEnabled != 'false' &&
@@ -467,7 +463,7 @@ jobs:
       - name: Save Lights On state
         if: always() && steps.config.outputs.enabled != 'false'
         run: |
-          node .github/lights-on/runner/state-store.mjs --save || true
+          node .github/lights-on/runner/state-store.mjs --save
 
       - name: Persist shared budget even after failed inference
         if: always() && steps.config.outputs.enabled == 'true'

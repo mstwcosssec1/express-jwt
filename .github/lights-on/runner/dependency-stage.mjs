@@ -40,6 +40,7 @@ export function prepareDependencyStage({ report, repoRoot = process.cwd(), confi
 
 export function publishDependencyStage({ selection, result, repoRoot = process.cwd(), base, stateFile,
   env = process.env, execFileImpl = execFileSync }) {
+  if (result.status === 'failed') throw new Error('Dependency agent execution failed; refusing publication.');
   const repo = assertWriteTargetIsInstalledRepo(env.GITHUB_REPOSITORY, env.GITHUB_REPOSITORY);
   if (typeof base !== 'string' || !base || base.startsWith('-')) throw new Error('Dependency publication requires a valid base branch.');
   const run = (cmd, args, extra = {}) => execFileImpl(cmd, args, { cwd: repoRoot, env, encoding: 'utf8', ...extra });

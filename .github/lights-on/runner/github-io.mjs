@@ -126,6 +126,7 @@ export function runGitHub(args, options = {}, execFileImpl = nativeExecFileSync)
 
 export function execFileSync(command, args, options = {}) {
   if (command === 'gh') return runGitHub(args, options);
+  if (command === 'git' && args[0] === 'push') return pushGit(args.slice(1), options);
   if (command === 'git' && args.includes('commit')) {
     const safe = [...args];
     for (let i = 0; i < safe.length; i++) {
@@ -135,6 +136,37 @@ export function execFileSync(command, args, options = {}) {
     return nativeExecFileSync(command, safe, options);
   }
   return nativeExecFileSync(command, args, options);
+}
+
+export function pushGit(args, options = {}, execFileImpl = nativeExecFileSync) {
+  const env = githubEnvironment(options.env || process.env);
+  const repo = installedRepository(env);
+  const token = env.GH_TOKEN || env.GITHUB_TOKEN;
+  if (typeof token !== 'string' || !token.trim() || /[\r\n]/.test(token)) {
+    throw new Error('Git publication requires a valid GH_TOKEN or GITHUB_TOKEN for this step.');
+  }
+  const flags = new Set(['-u', '--set-upstream', '--force', '--force-with-lease']);
+  if (!Array.isArray(args) || args.some((arg) => typeof arg !== 'string' ||
+      (arg.startsWith('-') && !flags.has(arg)))) throw new Error('Unsupported Git publication arguments.');
+  const positional = args.filter((arg) => !arg.startsWith('-'));
+  const ref = positional[1] || '';
+  const branch = /^(?:refs\/heads\/)?lights-on\/[A-Za-z0-9._/-]+$/.test(ref);
+  const tag = /^refs\/tags\/v\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/.test(ref);
+  if (positional.length !== 2 || positional[0] !== 'origin' || (!branch && !tag) ||
+      ref.includes('..') || ref.endsWith('.lock') ||
+      (tag && args.some((arg) => arg === '--force' || arg === '--force-with-lease'))) {
+    throw new Error('Git publication is limited to automation branches and non-forced release tags on origin.');
+  }
+  const urls = String(execFileImpl('git', ['remote', 'get-url', '--push', '--all', 'origin'],
+    { ...options, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })).trim().split(/\r?\n/);
+  const allowed = [`https://github.com/${repo}`, `https://github.com/${repo}.git`].map((url) => url.toLowerCase());
+  if (urls.length !== 1 || !allowed.includes(urls[0].replace(/\/$/, '').toLowerCase())) {
+    throw new Error('REPO_WRITE_VIOLATION: Git push origin must be the installed HTTPS GitHub repository.');
+  }
+  // Credentials come from this step's environment; token/helper settings are not written to Git config.
+  return execFileImpl('git', ['-c', 'credential.helper=', '-c', 'credential.helper=!gh auth git-credential',
+    '-c', 'credential.useHttpPath=true', '-c', 'http.followRedirects=false', 'push', ...args],
+  { ...options, env: { ...env, GIT_TERMINAL_PROMPT: '0', GH_PROMPT_DISABLED: '1' } });
 }
 
 export function submitCommitReview({ prNumber, headSha, verdict, body, env = process.env,
@@ -165,7 +197,8 @@ export function submitCommitReview({ prNumber, headSha, verdict, body, env = pro
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    runGitHub(process.argv.slice(2), { stdio: 'inherit' });
+    if (process.argv[2] === 'git-push') pushGit(process.argv.slice(3), { stdio: 'inherit' });
+    else runGitHub(process.argv.slice(2), { stdio: 'inherit' });
   } catch {
     console.error('Lights On GitHub operation failed; no external host/repository fallback is permitted.');
     process.exitCode = 1;

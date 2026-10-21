@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { normalizeUsage } from './usage.mjs';
 
@@ -234,7 +235,18 @@ export function saveState(state, options = {}) {
     updated_at: new Date().toISOString()
   };
 
-  fs.writeFileSync(stateFile, JSON.stringify(updated, null, 2) + '\n', 'utf8');
+  const temporary = path.join(dir, `.lights-on-state-${crypto.randomUUID()}.tmp`);
+  const fd = fs.openSync(temporary, 'wx', 0o600);
+  try {
+    try {
+      fs.writeFileSync(fd, JSON.stringify(updated, null, 2) + '\n', 'utf8');
+      fs.fsyncSync(fd);
+    } finally { fs.closeSync(fd); }
+    // Keep the prior ledger intact if writing or replacement fails.
+    fs.renameSync(temporary, stateFile);
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+  }
   return updated;
 }
 
@@ -306,6 +318,7 @@ export function recordUsage(state, { task = 'general', tokensUsed = null, costUs
     copilot_nano_aiu: normalized.copilot_nano_aiu,
     copilot_ai_credits_status: normalized.copilot_ai_credits_status,
     copilot_cli_invocations: normalized.copilot_cli_invocations,
+    copilot_sdk_requests: normalized.copilot_sdk_requests,
     copilot_usage_reports: normalized.copilot_usage_reports
   };
   state.usage_history.push(record);

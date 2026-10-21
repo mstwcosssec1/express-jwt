@@ -6,7 +6,7 @@ import { assertWriteTargetIsInstalledRepo } from './sync-upstream.mjs';
 export const STANDARD_LABELS = [
   ['lights-on:ignore', 'CFD3D7', 'Opt out of Lights On review and maintenance'],
   ['lights-on:actionable', '0E8A16', 'Queue an issue for an autonomous fix attempt'],
-  ['lights-on:migrate-dep', '5319E7', 'Maintainer-approved dependency migration'],
+  ['lights-on:migrate-dep', '5319E7', 'Request read-only dependency migration planning'],
   ['lights-on:hold', 'D93F0B', 'Block automatic merging until removed'],
   ['lights-on:automerge', '0E8A16', 'Opt into auto-merge when the remaining gates pass'],
   ['lights-on:re-review', '1D76DB', 'Request a fresh independent review'],

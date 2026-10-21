@@ -1,6 +1,6 @@
 # Routine dependency update
 
-Your only assignment is the dependency in the trusted Step D1 selection.
+Your only assignment is the dependency in the trusted Step D selection.
 Use its current/target version and manifest, scan evidence, and downstream context.
 Do not choose another dependency, perform migration research, or remediate a
 different security issue. Security fixes are assigned to Step C.
