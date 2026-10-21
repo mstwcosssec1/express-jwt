@@ -232,9 +232,7 @@ jobs:
 
           const reviewFile = '/tmp/pr-review-result.json';
           if (!fs.existsSync(reviewFile)) {
-            reportWorkflowEvent({ level: 'warning', title: 'PR review submission skipped',
-              message: 'No agent review result was available; no review was posted.' });
-            process.exit(0);
+            throw new Error('Expected agent review result file is missing: /tmp/pr-review-result.json');
           }
 
           const review = JSON.parse(fs.readFileSync(reviewFile, 'utf8'));
@@ -317,6 +315,7 @@ jobs:
           EXPECTED_PR_JSON_SHA256: ${{ steps.pr-data.outputs.pr_json_sha256 }}
           EXPECTED_PR_FILES_SHA256: ${{ steps.pr-data.outputs.pr_files_sha256 }}
           EXPECTED_PR_DIFF_SHA256: ${{ steps.pr-data.outputs.pr_diff_sha256 }}
+          REVIEW_RESULT_FILE: ${{ steps.review-agent.outputs.result_file }}
         run: |
           CI_STATUS=$(node --input-type=module -e 'import { configuredCiStatus } from "./.github/lights-on/runner/verify-ci.mjs"; console.log(configuredCiStatus(process.env.GITHUB_REPOSITORY, process.env.HEAD_SHA));')
           export CI_STATUS
@@ -331,11 +330,15 @@ jobs:
               process.exit(1);
             }
           '
+          review_args=()
+          if [ -n "$REVIEW_RESULT_FILE" ]; then
+            review_args+=(--review-file "$REVIEW_RESULT_FILE")
+          fi
           node .github/lights-on/runner/verify-pr-safety.mjs \
             --pr-file /tmp/pr.json \
             --files-file /tmp/pr-files.json \
             --diff-file /tmp/pr.diff \
-            --review-file /tmp/pr-review-result.json \
+            "${review_args[@]}" \
             --ci-status "$CI_STATUS" \
             --github-output > /tmp/merge-gate-decision.json
           node .github/lights-on/runner/workflow-report.mjs --merge-decision /tmp/merge-gate-decision.json

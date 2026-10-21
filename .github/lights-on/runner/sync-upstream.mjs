@@ -666,10 +666,14 @@ export function markUpstreamItemSynced(state, { upstreamRepo, number, localIssue
   return state.processed_items[key];
 }
 
+function writeJsonOutput(file, value) {
+  if (!file) return;
+  fs.mkdirSync(path.dirname(path.resolve(file)), { recursive: true });
+  fs.writeFileSync(path.resolve(file), JSON.stringify(value, null, 2), 'utf8');
+}
+
 /**
- * High-level orchestrator that resolves upstream, fetches read-only upstream context,
- * identifies unsynced upstream issues/PRs, and optionally creates local tracking issues
- * in `installedRepo` (never in `upstreamRepo`).
+ * Resolve upstream context and optionally mirror issues into the installed repository.
  */
 export async function syncUpstream({
   repoRoot = process.cwd(),
@@ -692,6 +696,14 @@ export async function syncUpstream({
   });
 
   if (!resolution.upstreamRepo) {
+    // Older callers use fixed paths even when upstream discovery is disabled.
+    writeJsonOutput(contextOutput, {
+      installedRepo: resolution.installedRepo, upstreamRepo: null, hasUpstream: false,
+      status: 'skipped', source: resolution.source,
+      reason: 'No upstream selected; no upstream context was fetched.',
+      openIssues: [], maintainerRulings: [], openPullRequests: [], recentReleases: []
+    });
+    writeJsonOutput(itemsOutput, []);
     return {
       enabled: false,
       hasUpstream: false,
@@ -711,10 +723,7 @@ export async function syncUpstream({
     fetchImpl
   });
 
-  if (contextOutput) {
-    fs.mkdirSync(path.dirname(path.resolve(contextOutput)), { recursive: true });
-    fs.writeFileSync(path.resolve(contextOutput), JSON.stringify(upstreamContext, null, 2), 'utf8');
-  }
+  writeJsonOutput(contextOutput, upstreamContext);
 
   let existingLocalItems = [];
   if (localItemsPath && fs.existsSync(localItemsPath)) {
@@ -756,10 +765,7 @@ export async function syncUpstream({
       })
     : unsynced;
 
-  if (itemsOutput) {
-    fs.mkdirSync(path.dirname(path.resolve(itemsOutput)), { recursive: true });
-    fs.writeFileSync(path.resolve(itemsOutput), JSON.stringify(mirroredIssues, null, 2), 'utf8');
-  }
+  writeJsonOutput(itemsOutput, mirroredIssues);
 
   const createdLocalIssues = [];
   const failures = [];
@@ -877,7 +883,10 @@ async function runCli() {
         'has_upstream=false',
         `installed_repo=${sanitizeGitHubOutputValue(res.installedRepo || '')}`,
         'upstream_repo=',
-        'unsynced_count=0'
+        'unsynced_count=0',
+        'created_local_count=0',
+        'context_file=',
+        'unsynced_file='
       ];
       fs.appendFileSync(process.env.GITHUB_OUTPUT, out.join('\n') + '\n', 'utf8');
     }

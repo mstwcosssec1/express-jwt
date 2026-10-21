@@ -299,6 +299,11 @@ export function ensureThreatModelSkills({
     cloned = true;
   }
 
+  const coreSkill = path.join(skillsSourceRoot, 'threat-model', 'SKILL.md');
+  if (!fs.existsSync(coreSkill) || !fs.statSync(coreSkill).isFile()) {
+    throw new Error(`Threat-model skill cache is incomplete: ${coreSkill}. Inspect and rebuild the cache before retrying.`);
+  }
+
   const installedSkills = [];
   const claudeSkillsDir = path.join(absRepoRoot, '.claude', 'skills');
   const githubSkillsDir = path.join(absRepoRoot, '.github', 'skills');
@@ -327,7 +332,7 @@ export function ensureThreatModelSkills({
     path.join(resolvedCacheDir, 'scripts', 'new_threat_model.py'),
     path.join(resolvedCacheDir, 'skills', 'threat-model', 'scripts', 'new_threat_model.py')
   ];
-  const newThreatModelScript = scriptCandidates.find((p) => fs.existsSync(p)) || scriptCandidates[0];
+  const newThreatModelScript = scriptCandidates.find((p) => fs.existsSync(p) && fs.statSync(p).isFile()) || null;
 
   return {
     ok: true,

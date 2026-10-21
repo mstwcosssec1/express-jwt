@@ -220,8 +220,7 @@ jobs:
 
           const resultPath = '/tmp/lights-on-result.json';
           if (!fs.existsSync(resultPath)) {
-            console.log('No agent result file found at /tmp/lights-on-result.json; skipping post-processing.');
-            process.exit(0);
+            throw new Error('Expected agent result file is missing: /tmp/lights-on-result.json');
           }
 
           const result = JSON.parse(fs.readFileSync(resultPath, 'utf8'));

@@ -377,8 +377,8 @@ function runCli() {
     Array.isArray(pr) ||
     !Array.isArray(changedFiles);
 
-  const diffText = diffFile && fs.existsSync(diffFile) ? fs.readFileSync(diffFile, 'utf8') : '';
-  const reviewResult = reviewFile && fs.existsSync(reviewFile) ? readJsonFileSafe(reviewFile, null) : null;
+  const diffText = diffFile ? fs.readFileSync(diffFile, 'utf8') : '';
+  const reviewResult = reviewFile ? parseJsonOrPaginatedArray(fs.readFileSync(reviewFile, 'utf8')) : null;
   const config = loadConfig();
 
   const result = evaluatePrSafety({

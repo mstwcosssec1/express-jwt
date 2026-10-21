@@ -30,7 +30,7 @@ inputs:
     required: false
     default: "/tmp/lights-on-result.json"
   install_threat_model_skills:
-    description: "Whether to clone and install alpha-omega-security/threat-model skills into .claude/skills and .github/skills"
+    description: "Prepare cached threat-model skills; always enabled for bootstrap-threat-model"
     required: false
     default: "false"
 
@@ -100,7 +100,7 @@ runs:
         node .github/lights-on/runner/install-copilot-sdk.mjs --directory "$RUNNER_TEMP/lights-on-copilot-sdk"
 
     - name: Install alpha-omega-security/threat-model skills
-      if: steps.check-config.outputs.enabled != 'false' && inputs.install_threat_model_skills == 'true'
+      if: steps.check-config.outputs.enabled != 'false' && (inputs.task == 'bootstrap-threat-model' || inputs.install_threat_model_skills == 'true')
       shell: bash
       run: |
         node --input-type=module -e 'import { ensureThreatModelSkills } from "./.github/lights-on/runner/ensure-threat-model.mjs"; ensureThreatModelSkills({ installToWorkspace: false });'
@@ -115,28 +115,11 @@ runs:
         INPUT_CONTEXT_FILE: ${{ inputs.context_file }}
         INPUT_DEPENDENCY_SELECTION_FILE: ${{ inputs.dependency_selection_file }}
         INPUT_OUTPUT_FILE: ${{ inputs.output_file }}
-        CONFIG_ENABLED: ${{ steps.check-config.outputs.enabled }}
-        CHECK_PROVIDER: ${{ steps.check-config.outputs.provider }}
-        CHECK_MODEL: ${{ steps.check-config.outputs.model }}
         LIGHTS_ON_UPSTREAM_REPO: ${{ steps.check-config.outputs.upstream_repo }}
         LIGHTS_ON_SANDBOX_IMAGE: ${{ inputs.sandbox_image }}
         LIGHTS_ON_COPILOT_SDK_DIR: ${{ runner.temp }}/lights-on-copilot-sdk
         LIGHTS_ON_COPILOT_CLI_DIR: ${{ runner.temp }}/lights-on-copilot-cli
       run: |
-        if [ "$CONFIG_ENABLED" = "false" ] || [ "$LIGHTS_ON_ENABLED" = "false" ]; then
-          node .github/lights-on/runner/workflow-report.mjs --title "Agent execution skipped" --message "Lights On is disabled; no agent or PR publication was performed."
-          {
-            echo "status=skipped"
-            echo "provider=${CHECK_PROVIDER//[$'\r\n']/}"
-            echo "model=${CHECK_MODEL//[$'\r\n']/}"
-            echo "verdict=NONE"
-            echo "action_taken=disabled"
-            echo "risk_level=low"
-            echo "result_file=${INPUT_OUTPUT_FILE//[$'\r\n']/}"
-          } >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-
         args=(--task "$INPUT_TASK" --tier "$INPUT_TIER" --output "$INPUT_OUTPUT_FILE")
         if [ "$INPUT_TASK" = "bootstrap-threat-model" ]; then
           args+=(--context-file /tmp/lights-on-threat-model/skills/threat-model/SKILL.md)

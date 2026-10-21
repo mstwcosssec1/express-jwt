@@ -130,6 +130,7 @@ jobs:
           fi
 
       - name: Step A — Bootstrap or Sync THREAT_MODEL.md
+        id: bootstrap-agent
         if: >-
           steps.config.outputs.enabled != 'false' &&
           (steps.threat-model-check.outputs.exists == 'false' || inputs.task == 'bootstrap')
@@ -145,12 +146,13 @@ jobs:
           task: bootstrap-threat-model
           tier: reasoning
           install_threat_model_skills: 'true'
-          context_file: /tmp/lights-on-upstream-context.json
+          context_file: ${{ steps.upstream-sync.outputs.context_file }}
           output_file: /tmp/lights-on-bootstrap-result.json
 
       - name: Open PR for THREAT_MODEL.md if updated
         if: >-
           steps.config.outputs.enabled != 'false' &&
+          steps.bootstrap-agent.outputs.status == 'completed' &&
           (steps.threat-model-check.outputs.exists == 'false' || inputs.task == 'bootstrap')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -184,6 +186,7 @@ jobs:
 
       # Step C — Security Vulnerability Scanning & Remediation (security-remediator)
       - name: Step C — Security Vulnerability Scanning & Remediation
+        id: security-agent
         if: >-
           steps.config.outputs.enabled != 'false' &&
           (inputs.task == 'all' || inputs.task == 'security' || inputs.task == '')
@@ -203,6 +206,7 @@ jobs:
       - name: Open Security Remediation PR if fixes were produced
         if: >-
           steps.config.outputs.enabled != 'false' &&
+          steps.security-agent.outputs.status == 'completed' &&
           (inputs.task == 'all' || inputs.task == 'security' || inputs.task == '')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -277,6 +281,7 @@ jobs:
 
       # Step H — Documentation Clarification & Actionable Issue Fixes (docs-clarifier / issue-responder)
       - name: Step H — Clarify documentation (docs-clarifier)
+        id: docs-agent
         if: >-
           steps.config.outputs.enabled != 'false' &&
           (inputs.task == 'all' || inputs.task == 'docs' || inputs.task == 'issues' || inputs.task == '')
@@ -291,12 +296,13 @@ jobs:
           sandbox_image: ${{ vars.LIGHTS_ON_SANDBOX_IMAGE }}
           task: docs-clarifier
           tier: default
-          context_file: /tmp/lights-on-upstream-context.json
+          context_file: ${{ steps.upstream-sync.outputs.context_file }}
           output_file: /tmp/lights-on-docs-result.json
 
       - name: Open Documentation Clarification PR if changes were produced
         if: >-
           steps.config.outputs.enabled != 'false' &&
+          steps.docs-agent.outputs.status == 'completed' &&
           (inputs.task == 'all' || inputs.task == 'docs' || inputs.task == 'issues' || inputs.task == '')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -334,9 +340,11 @@ jobs:
           echo "count=$count" >> "$GITHUB_OUTPUT"
 
       - name: Respond to open actionable issues (issue-responder)
+        id: issues-agent
         if: >-
           steps.config.outputs.enabled != 'false' &&
           (inputs.task == 'all' || inputs.task == 'docs' || inputs.task == 'issues' || inputs.task == 'upstream' || inputs.task == '') &&
+          steps.actionable-issues.outputs.count != '' &&
           steps.actionable-issues.outputs.count != '0'
         uses: $/.github/actions/lights-on-agent
         env:
@@ -350,12 +358,13 @@ jobs:
           task: issue-responder
           tier: reasoning
           event_file: /tmp/lights-on-actionable-issues.json
-          context_file: /tmp/lights-on-upstream-context.json
+          context_file: ${{ steps.upstream-sync.outputs.context_file }}
           output_file: /tmp/lights-on-issues-result.json
 
       - name: Open Actionable Issue Fix PR if changes were produced and clean working tree
         if: >-
           steps.config.outputs.enabled != 'false' &&
+          steps.issues-agent.outputs.status == 'completed' &&
           (inputs.task == 'all' || inputs.task == 'docs' || inputs.task == 'issues' || inputs.task == 'upstream' || inputs.task == '')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -375,9 +384,11 @@ jobs:
           const upstreamRepo = process.env.LIGHTS_ON_UPSTREAM_REPO || '';
           const defaultBranch = process.env.DEFAULT_BRANCH || 'main';
           const resultFile = '/tmp/lights-on-issues-result.json';
-          const result = fs.existsSync(resultFile)
-            ? JSON.parse(fs.readFileSync(resultFile, 'utf8'))
-            : {};
+          const result = JSON.parse(fs.readFileSync(resultFile, 'utf8'));
+          if (result.status !== 'completed' || result.dry_run) {
+            reportWorkflowEvent({ title: 'Issue-fix publication skipped', message: 'No completed live agent result is available.' });
+            process.exit(0);
+          }
 
           const statusOut = execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim();
           if (statusOut) {
