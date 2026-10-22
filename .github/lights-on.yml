@@ -65,14 +65,14 @@ policies:
     auto_migrate_unpatched_cve: true
 
 limits:
-  max_prs_per_run: 2
-  max_attempts_per_issue: 2
+  max_prs_per_run: 3
+  max_attempts_per_issue: 3
   max_issue_responses_per_hour: 10
-  max_agent_runs_per_day: 6
+  max_agent_runs_per_day: 12
   max_turns_per_run: 25
   max_tokens_per_run: 300000
-  max_cost_per_run_usd: 2.0
-  max_daily_budget_usd: 10.0
+  max_cost_per_run_usd: 5.0
+  max_daily_budget_usd: 20.0
 
 release:
   enabled: false
