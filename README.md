@@ -267,6 +267,10 @@ app.use(
 );
 ```
 
+### CORS preflight requests
+
+A preflight `OPTIONS` request whose `Access-Control-Request-Headers` header lists `authorization` skips token verification and continues to the next middleware, so browsers can complete the CORS handshake. `req.auth` is not set for these requests, so make sure your `OPTIONS` handlers do not expose protected data.
+
 ## Typescript
 
 A `Request` type is provided from `express-jwt`, which extends `express.Request` with the `auth` property. It could be aliased, like how `JWTRequest` is below.
