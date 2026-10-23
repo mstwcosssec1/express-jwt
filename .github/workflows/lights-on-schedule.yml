@@ -78,12 +78,19 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node .github/lights-on/runner/ensure-labels.mjs
 
+      - name: Check effective cache access
+        id: cache-access
+        if: steps.config.outputs.enabled != 'false'
+        uses: $/.github/actions/lights-on-cache-access
+
       - name: Restore Lights On state cache
         id: state-cache
-        if: steps.config.outputs.enabled != 'false'
+        if: steps.config.outputs.enabled != 'false' && steps.cache-access.outputs.readable == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: /tmp/lights-on-cache
+          path: |
+            /tmp/lights-on-cache
+            /tmp/lights-on-threat-model
           key: lights-on-state-v2-${{ github.repository }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             lights-on-state-v2-${{ github.repository }}-
@@ -144,6 +151,7 @@ jobs:
         with:
           sandbox_image: ${{ vars.LIGHTS_ON_SANDBOX_IMAGE }}
           task: bootstrap-threat-model
+          restore_state: 'false'
           tier: reasoning
           install_threat_model_skills: 'true'
           context_file: ${{ steps.upstream-sync.outputs.context_file }}
@@ -203,6 +211,7 @@ jobs:
         with:
           sandbox_image: ${{ vars.LIGHTS_ON_SANDBOX_IMAGE }}
           task: security-remediator
+          restore_state: 'false'
           tier: reasoning
           context_file: /tmp/lights-on-deps.json
           output_file: /tmp/lights-on-security-result.json
@@ -265,6 +274,7 @@ jobs:
         with:
           sandbox_image: ${{ vars.LIGHTS_ON_SANDBOX_IMAGE }}
           task: ${{ steps.dependency-selection.outputs.task }}
+          restore_state: 'false'
           tier: ${{ steps.dependency-selection.outputs.tier }}
           dependency_selection_file: /tmp/lights-on-dependency-selection.json
           output_file: /tmp/lights-on-deps-result.json
@@ -303,6 +313,7 @@ jobs:
         with:
           sandbox_image: ${{ vars.LIGHTS_ON_SANDBOX_IMAGE }}
           task: docs-clarifier
+          restore_state: 'false'
           tier: default
           context_file: ${{ steps.upstream-sync.outputs.context_file }}
           output_file: /tmp/lights-on-docs-result.json
@@ -368,6 +379,7 @@ jobs:
         with:
           sandbox_image: ${{ vars.LIGHTS_ON_SANDBOX_IMAGE }}
           task: issue-responder
+          restore_state: 'false'
           tier: reasoning
           event_file: /tmp/lights-on-actionable-issues.json
           context_file: ${{ steps.upstream-sync.outputs.context_file }}
@@ -491,7 +503,7 @@ jobs:
           node .github/lights-on/runner/state-store.mjs --save
 
       - name: Persist shared budget even after failed inference
-        if: always() && steps.config.outputs.enabled == 'true'
+        if: always() && steps.config.outputs.enabled == 'true' && steps.cache-access.outputs.writable == 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |

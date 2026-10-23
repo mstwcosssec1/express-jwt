@@ -28,6 +28,32 @@ function readJson(root, name) {
   return JSON.parse(fs.readFileSync(safeFile(root, name), 'utf8'));
 }
 
+function npmLayout(root, manifest) {
+  const pkg = readJson(root, manifest);
+  const directory = path.posix.dirname(manifest);
+  const lockfile = path.posix.join(directory, 'package-lock.json');
+  const conflictingLock = ['npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml'].some((name) =>
+    fs.existsSync(safeFile(root, path.posix.join(directory, name))));
+  const unsupportedManager = pkg.packageManager !== undefined &&
+    (typeof pkg.packageManager !== 'string' || !pkg.packageManager.startsWith('npm@'));
+  const hasLock = fs.existsSync(safeFile(root, lockfile));
+  const lock = hasLock ? readJson(root, lockfile) : null;
+  return { pkg, lockfile, hasLock, lock, supported: !conflictingLock && !unsupportedManager && !pkg.workspaces &&
+    typeof pkg.scripts?.test === 'string' && Boolean(pkg.scripts.test.trim()) };
+}
+
+function verifyNpmLock(lock, manifest, name, version) {
+  if (![2, 3].includes(lock?.lockfileVersion) || !lock.packages?.[''] ||
+      lock.packages?.[`node_modules/${name}`]?.version !== version) {
+    throw new Error('Lockfile does not resolve the selected dependency to the planned version.');
+  }
+  for (const section of sections) {
+    if (!isDeepStrictEqual(manifest[section] || {}, lock.packages[''][section] || {})) {
+      throw new Error('Manifest and root lockfile requirements disagree.');
+    }
+  }
+}
+
 export function approvedMigration(config, id) {
   const plans = config.dependencies?.approved_migrations || [];
   const plan = plans.find((item) => item.id === id);
@@ -60,7 +86,7 @@ export function selectDependencyWork({ report, repoRoot, openPrs = [], openPlans
   if (mode === 'migration') plan = approvedMigration(config, planId);
   const candidates = report.dependencies.filter((dep) =>
     mode === 'migration' ? dep.name === plan.name && dep.manifest === plan.manifest && dep.ecosystem === plan.ecosystem :
-      mode === 'migration-plan' ? dep.recommendedAction === 'migrate' :
+      mode === 'migration-plan' ? ['migrate', 'evaluate-major-bump'].includes(dep.recommendedAction) :
         ['bump-minor-or-patch', 'bump-patch', 'bump-minor'].includes(dep.recommendedAction));
   const deferred = report.dependencies.filter((dep) =>
     ['security-bump', 'migrate', 'evaluate-major-bump'].includes(dep.recommendedAction))
@@ -77,6 +103,7 @@ export function selectDependencyWork({ report, repoRoot, openPrs = [], openPlans
     currentByKey.get(key).push(dep);
   }
   for (const dep of unique) {
+    let lockfile;
     const key = dependencyKey(dep);
     const stateKey = mode === 'updates' ? key : `${key}:${mode}:${planId}`;
     if (mode === 'migration-plan' && openPlans.includes(key)) {
@@ -121,33 +148,32 @@ export function selectDependencyWork({ report, repoRoot, openPrs = [], openPlans
         blockers.push({ key, reason: 'unsupported-dependency-range' });
         continue;
       }
-      const lock = path.posix.join(path.posix.dirname(dep.manifest), 'package-lock.json');
-      if (!fs.existsSync(safeFile(repoRoot, lock))) {
-        blockers.push({ key, reason: 'routine-update-requires-package-lock-v2-or-v3' });
-        continue;
-      }
-      const parsed = readJson(repoRoot, lock);
-      const pkg = readJson(repoRoot, dep.manifest);
-      const packageDir = path.posix.dirname(dep.manifest);
-      const conflictingLock = ['npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml'].some((name) =>
-        fs.existsSync(safeFile(repoRoot, path.posix.join(packageDir, name))));
-      if (conflictingLock || ![2, 3].includes(parsed.lockfileVersion) || !parsed.packages?.[''] ||
-          !parsed.packages?.[`node_modules/${dep.name}`] || pkg.workspaces ||
-          pkg.scripts?.test === undefined || !String(pkg.scripts.test).trim()) {
+      const layout = npmLayout(repoRoot, dep.manifest);
+      if (!layout.supported || layout.hasLock && (![2, 3].includes(layout.lock?.lockfileVersion) ||
+          !layout.lock?.packages?.[''] || !layout.lock?.packages?.[`node_modules/${dep.name}`])) {
         blockers.push({ key, reason: 'unsupported-lockfile-layout-or-missing-test-command' });
         continue;
       }
+      lockfile = { path: layout.lockfile, mode: layout.hasLock ? 'committed' : 'temporary',
+        sha256: layout.hasLock ? dependencyFileHash(repoRoot, layout.lockfile) : null };
     }
     const task = mode === 'updates' ? 'dependency-updater' :
       mode === 'migration-plan' ? 'dependency-migration-planner' : 'dependency-migrator';
     return { status: 'ready', task, tier: mode === 'updates' ? 'default' : 'reasoning',
       key, stateKey, branch: dependencyBranch(dep), dependency: dep,
       manifest_sha256: dependencyFileHash(repoRoot, dep.manifest), plan,
+      ...(lockfile ? { lockfile } : {}),
+      ...(mode === 'migration-plan' ? {
+        planning_kind: dep.recommendedAction === 'evaluate-major-bump' ? 'major-upgrade' : 'replacement'
+      } : {}),
       downstreamDependents: report.downstreamDependents, deferred, skipped, blockers };
   }
+  let reason = blockers.length ? 'No verifiable candidate; see blockers.' : 'No eligible unhandled dependency for this lane.';
+  if (mode === 'updates' && !blockers.length && !unique.length && deferred.length) {
+    reason = 'No routine patch/minor updates selected. Security work belongs to task security; major upgrades and replacements require task migration-plan.';
+  }
   return { status: blockers.length || mode === 'migration' ? 'blocked' : 'skipped',
-    reason: blockers.length ? 'No verifiable candidate; see blockers.' : 'No eligible unhandled dependency for this lane.',
-    deferred, skipped, blockers };
+    reason, deferred, skipped, blockers };
 }
 
 function sourceChanges(source, candidate) {
@@ -186,10 +212,23 @@ export function verifyDependencyScope({ selection, repoRoot, candidateRoot, conf
     commands: plan.validation_commands };
   }
   if (selection.task !== 'dependency-updater' || dep.ecosystem !== 'npm') throw new Error('Invalid routine dependency task.');
-  const lockName = path.posix.join(path.posix.dirname(dep.manifest), 'package-lock.json');
-  if (changes.some((name) => name !== dep.manifest && name !== lockName) ||
-      !changes.includes(lockName)) throw new Error('Routine update must change only the selected manifest and its lockfile.');
-  const before = readJson(repoRoot, dep.manifest);
+  const layout = npmLayout(repoRoot, dep.manifest);
+  if (!layout.supported) throw new Error('Unsupported npm layout or missing test command.');
+  const lockName = layout.lockfile;
+  const temporaryLock = !layout.hasLock;
+  const expectedLock = { path: lockName, mode: temporaryLock ? 'temporary' : 'committed',
+    sha256: temporaryLock ? null : dependencyFileHash(repoRoot, lockName) };
+  if (selection.lockfile && !isDeepStrictEqual(selection.lockfile, expectedLock)) {
+    throw new Error('Lockfile changed since dependency selection.');
+  }
+  if (temporaryLock) {
+    if (changes.length !== 1 || changes[0] !== dep.manifest) {
+      throw new Error('A lockfile-free update must change only the selected manifest; the validation lockfile is temporary.');
+    }
+  } else if (changes.some((name) => name !== dep.manifest && name !== lockName) || !changes.includes(lockName)) {
+    throw new Error('Routine update must change only the selected manifest and its lockfile.');
+  }
+  const before = layout.pkg;
   const after = readJson(candidateRoot, dep.manifest);
   const reverted = structuredClone(after);
   let updated = false;
@@ -206,16 +245,7 @@ export function verifyDependencyScope({ selection, repoRoot, candidateRoot, conf
     }
   }
   if (!updated || !isDeepStrictEqual(before, reverted)) throw new Error('Routine update changed unrelated manifest fields.');
-  const lock = readJson(candidateRoot, lockName);
-  if (![2, 3].includes(lock.lockfileVersion) || !lock.packages?.[''] ||
-      lock.packages?.[`node_modules/${dep.name}`]?.version !== dep.latestVersion) {
-    throw new Error('Lockfile does not resolve the selected dependency to the planned version.');
-  }
-  for (const section of sections) {
-    if (!isDeepStrictEqual(after[section] || {}, lock.packages[''][section] || {})) {
-      throw new Error('Manifest and root lockfile requirements disagree.');
-    }
-  }
+  if (!temporaryLock) verifyNpmLock(readJson(candidateRoot, lockName), after, dep.name, dep.latestVersion);
   const pkgDir = path.posix.dirname(dep.manifest);
   const shellDir = `'${pkgDir.replace(/'/g, "'\\''")}'`;
   const expected = [{ ecosystem: 'npm', name: dep.name, version: dep.latestVersion }];
@@ -227,7 +257,9 @@ export function verifyDependencyScope({ selection, repoRoot, candidateRoot, conf
     scripts.map((name) => `npm run ${name}`).join(' && ');
   const extra = config.dependencies?.validation_commands || [];
   if (!Array.isArray(extra)) throw new Error('dependencies.validation_commands must be an array.');
-  return { changes, expected, commands: [command, ...extra] };
+  return { changes, expected, commands: [command, ...extra],
+    ...(temporaryLock ? { temporaryLock: { path: lockName,
+      command: `cd ${shellDir} && npm install --package-lock-only --lockfile-version=3 --package-lock=true --offline --ignore-scripts --no-audit --no-fund` } } : {}) };
 }
 
 export async function validateDependencyCandidate({ selection, repoRoot, candidateRoot, config = {},
@@ -250,9 +282,21 @@ export async function validateDependencyCandidate({ selection, repoRoot, candida
   const worker = sandboxFactory({ repoRoot: candidateRoot, image });
   try {
     const checks = [];
+    let temporaryLock;
+    if (scope.temporaryLock) {
+      const { path: lockPath, command } = scope.temporaryLock;
+      const result = await worker.run(command);
+      checks.push({ command, exit_code: result.exit_code });
+      if (result.exit_code !== 0) {
+        throw new Error(`Temporary npm lockfile generation failed (exit ${result.exit_code}); prepare offline registry metadata and package archives for the candidate graph.`);
+      }
+      verifyNpmLock(readJson(worker.workspace, lockPath), readJson(candidateRoot, selection.dependency.manifest),
+        selection.dependency.name, selection.dependency.latestVersion);
+      temporaryLock = { path: lockPath, sha256: dependencyFileHash(worker.workspace, lockPath) };
+    }
     for (const command of scope.commands) {
       if (typeof command !== 'string' || !command.trim()) throw new Error('Invalid trusted validation command.');
-      const result = worker.run(command);
+      const result = await worker.run(command);
       checks.push({ command, exit_code: result.exit_code });
       if (result.exit_code !== 0) throw new Error(`Dependency validation command failed (exit ${result.exit_code}); offline dependencies/toolchains may be missing.`);
     }
@@ -265,6 +309,9 @@ export async function validateDependencyCandidate({ selection, repoRoot, candida
         throw new Error(`Validation modified candidate source: ${name}`);
       }
     }
+    if (temporaryLock && dependencyFileHash(worker.workspace, temporaryLock.path) !== temporaryLock.sha256) {
+      throw new Error('Validation modified the temporary dependency lockfile.');
+    }
     if (selection.task === 'dependency-migrator') {
       const resolution = readJson(worker.workspace, 'dependency-validation.json');
       if (!Array.isArray(resolution.resolved) ||
@@ -273,6 +320,7 @@ export async function validateDependencyCandidate({ selection, repoRoot, candida
       }
     }
     return { status: 'passed', key: selection.key, task: selection.task, advisory, checks,
+      ...(temporaryLock ? { lockfile: { ...temporaryLock, mode: 'temporary', published: false } } : {}),
       files: scope.changes.map((name) => ({ path: name,
         sha256: fs.existsSync(safeFile(candidateRoot, name)) ? dependencyFileHash(candidateRoot, name) : null })) };
   } finally { worker.dispose(); }

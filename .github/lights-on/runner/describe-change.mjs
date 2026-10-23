@@ -40,6 +40,11 @@ export function describeChange({ result, files = result?.files_changed || [], va
   if (result.dependency_validation) {
     const evidence = result.dependency_validation;
     verification.push(`Dependency candidate validation: ${evidence.status}.`);
+    if (evidence.lockfile?.mode === 'temporary') {
+      verification.push('The npm lockfile was generated only for offline validation and is not published; only the manifest is published.',
+        `Validation lock SHA-256: ${evidence.lockfile.sha256}.`,
+        'Validation covers this resolved graph, not every future dependency version allowed by the manifest ranges.');
+    }
     for (const check of evidence.checks || []) verification.push(`- ${check.command}\n  Exit code: ${check.exit_code ?? 'unknown'}`);
     if (evidence.reason) verification.push(`Reason: ${evidence.reason}`);
   }

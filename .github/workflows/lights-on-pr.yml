@@ -223,7 +223,8 @@ jobs:
           node --input-type=module << 'EOF'
           import fs from 'node:fs';
           import { execFileSync, submitCommitReview } from './.github/lights-on/runner/github-io.mjs';
-          import { sanitizeAgentLabelChanges, formatStateComment } from './.github/lights-on/runner/state-store.mjs';
+          import { formatStateComment } from './.github/lights-on/runner/state-store.mjs';
+          import { prepareAgentLabelChanges } from './.github/lights-on/runner/agent-labels.mjs';
           import { reportWorkflowEvent, githubItemUrl } from './.github/lights-on/runner/workflow-report.mjs';
           import { assertWriteTargetIsInstalledRepo, neutralizeCrossRepoAutoLinks } from './.github/lights-on/runner/sync-upstream.mjs';
 
@@ -244,11 +245,12 @@ jobs:
           const prNumber = process.env.PR_NUMBER;
           const headSha = process.env.HEAD_SHA;
 
-          const { labelsToAdd, labelsToRemove } = sanitizeAgentLabelChanges(
-            review.labels_to_add,
-            review.labels_to_remove,
-            { readOnly: true }
-          );
+          const { labelsToAdd, labelsToRemove } = prepareAgentLabelChanges({
+            repo: installedRepo, installedRepo,
+            labelsToAdd: review.labels_to_add,
+            labelsToRemove: [...(Array.isArray(review.labels_to_remove) ? review.labels_to_remove : []), 'lights-on:re-review'],
+            readOnly: true
+          });
           const gateResults = review.gate_results || review.gates || null;
           const breakingApiChange = Boolean(review.breaking_api_change);
 
@@ -281,9 +283,6 @@ jobs:
           reportWorkflowEvent({ title: 'PR review posted', message: `Posted commit-bound ${submitted.event} review for PR #${prNumber}; agent verdict: ${verdict}. This is not merge authorization.`,
             url: githubItemUrl(installedRepo, 'pull', prNumber), details: { 'Head SHA': headSha } });
 
-          const removeSet = new Set(labelsToRemove);
-          removeSet.add('lights-on:re-review');
-
           if (labelsToAdd.length > 0) {
             try {
               execFileSync('gh', ['pr', 'edit', prNumber, '--repo', installedRepo, '--add-label', labelsToAdd.join(',')], { stdio: 'inherit' });
@@ -292,9 +291,9 @@ jobs:
               throw err;
             }
           }
-          if (removeSet.size > 0) {
+          if (labelsToRemove.length > 0) {
             try {
-              execFileSync('gh', ['pr', 'edit', prNumber, '--repo', installedRepo, '--remove-label', Array.from(removeSet).join(',')], { stdio: 'inherit' });
+              execFileSync('gh', ['pr', 'edit', prNumber, '--repo', installedRepo, '--remove-label', labelsToRemove.join(',')], { stdio: 'inherit' });
             } catch (err) {
               reportWorkflowEvent({ level: 'error', title: 'PR label cleanup failed', message: err.message });
               throw err;
@@ -386,7 +385,7 @@ jobs:
           node .github/lights-on/runner/github-io.mjs pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --add-label "lights-on:automerge-disabled-external"
 
       - name: Persist shared budget even after failed inference
-        if: always() && steps.review-agent.outcome != '' && steps.review-agent.outcome != 'skipped'
+        if: always() && steps.review-agent.outputs.cache_writable == 'true' && steps.review-agent.outcome != '' && steps.review-agent.outcome != 'skipped'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |

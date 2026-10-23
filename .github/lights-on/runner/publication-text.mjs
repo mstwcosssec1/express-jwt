@@ -22,7 +22,7 @@ function inlineCode(text) {
 function plainMarkdown(text) {
   return text.split(/(\s+)/).map((token) => {
     // Keep all reference-bearing tokens in code, including entities and bare SHAs.
-    if (/[#@&/\\<>]|\S\.\S|[a-z][a-z0-9+.-]*:\S|\b[a-f0-9]{7,40}\b|\bGH-\d+\b/i.test(token)) return inlineCode(token);
+    if (/[$#@&/\\<>]|\S\.\S|[a-z][a-z0-9+.-]*:\S|\b[a-f0-9]{7,40}\b|\bGH-\d+\b/i.test(token)) return inlineCode(token);
     return token.replace(/[\\`*_[\]{}()!|~]/g, '\\$&');
   }).join('');
 }
@@ -35,7 +35,7 @@ function inlineMarkdown(source, depth = 0) {
   };
   const flush = () => { append(plainMarkdown(plain)); plain = ''; };
   for (let i = 0; i < source.length;) {
-    if (source[i] === '\\' && /[\\`*_[\]{}()!|~#+.<>@&:/-]/.test(source[i + 1] || '')) {
+    if (source[i] === '\\' && /[\\`*_[\]{}()!|~$#+.<>@&:/-]/.test(source[i + 1] || '')) {
       plain += source[i + 1]; i += 2; continue;
     }
     if (source[i] === '`') {
@@ -71,9 +71,10 @@ function inlineMarkdown(source, depth = 0) {
   return output;
 }
 
-function codeBlock(content, language = '') {
+function codeBlock(content) {
   const fence = '`'.repeat(Math.max(3, 1 + Math.max(0, ...(content.match(/`+/g) || []).map((run) => run.length))));
-  return `${fence}${/^[A-Za-z0-9_-]{1,32}$/.test(language) ? language : ''}\n${content}\n${fence}`;
+  // GitHub enriches languages such as mermaid and math into interactive content.
+  return `${fence}text\n${content}\n${fence}`;
 }
 
 /**
@@ -91,7 +92,7 @@ export function markdownPublicationBody(value) {
       const content = [];
       const close = new RegExp(`^ {0,3}${fence[1][0]}{${fence[1].length},}\\s*$`);
       while (++i < lines.length && !close.test(lines[i])) content.push(lines[i]);
-      output.push(codeBlock(content.join('\n'), fence[2].trim()));
+      output.push(codeBlock(content.join('\n')));
       continue;
     }
     if (/^(?: {4}|\t)/.test(line)) {

@@ -39,6 +39,22 @@ export function prepareDependencyStage({ report, repoRoot = process.cwd(), confi
     openPlans, openPrs: githubSnapshot(repo, execFileImpl, env) });
 }
 
+export function reportDependencySelection(selection, { env = process.env } = {}) {
+  reportWorkflowEvent({ title: `Dependency selection ${selection.status}`,
+    level: selection.status === 'blocked' ? 'warning' : 'notice',
+    message: selection.reason || `${selection.task} selected; no PR has been published yet.`,
+    details: { Dependency: selection.dependency?.name || 'none',
+      Deferred: selection.deferred?.length || 0,
+      Routes: [...new Set((selection.deferred || []).map((item) =>
+        item.route === 'Step C' ? 'security: select task security or all' : 'migration-plan: select task migration-plan'))].join('; ') || 'none',
+      Lockfile: selection.lockfile?.mode === 'temporary'
+        ? 'Generated only in the offline validation worker; only the manifest is published.'
+        : selection.lockfile?.path || 'not selected',
+      Blockers: (selection.blockers || []).map((item) => `${item.key}: ${item.reason}`).join('; ') || 'none',
+      Skipped: (selection.skipped || []).map((item) => `${item.key}: ${item.reason}`).join('; ') || 'none' }
+  }, { env });
+}
+
 export function publishDependencyStage({ selection, result, repoRoot = process.cwd(), base, stateFile,
   env = process.env, execFileImpl = execFileSync }) {
   if (result.status === 'failed') throw new Error('Dependency agent execution failed; refusing publication.');
@@ -96,8 +112,13 @@ export function publishDependencyStage({ selection, result, repoRoot = process.c
   if (!existing) {
     ensureLabels({ repo, installedRepo: repo, labels: ['lights-on:dependencies', 'lights-on:needs-human'], execFileImpl, env });
     const title = `${planning ? 'Dependency migration plan' : 'Dependency update blocked'}: ${selection.dependency.name}`;
+    const execution = !planning
+      ? 'Resolve the recorded verification blocker before retrying this lane; do not bypass validation to publish the candidate.'
+      : selection.planning_kind === 'major-upgrade'
+        ? 'A same-package major upgrade requires a separately reviewed implementation PR; the migration executor only replaces or removes dependencies.'
+        : 'Migration execution requires a reviewed approved_migrations configuration entry and a separate manual migration run.';
     const body = formatStateComment(neutralizeCrossRepoAutoLinks(String(reason), '', { installedRepo: repo }) +
-      '\n\nNo dependency code was published. Migration execution requires a reviewed approved_migrations configuration entry and a separate manual migration run.',
+      `\n\nNo dependency code was published. ${execution}`,
       { task: selection.task, dependency_key: selection.key });
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'lights-on-dependency-issue-'));
     try {
@@ -130,13 +151,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       if (process.env.GITHUB_OUTPUT) fs.appendFileSync(process.env.GITHUB_OUTPUT,
         `ready=${selection.status === 'ready'}\ntask=${sanitizeGitHubOutputValue(selection.task || '')}\ntier=${selection.tier || 'default'}\n`);
       console.log(JSON.stringify(selection, null, 2));
-      reportWorkflowEvent({ title: `Dependency selection ${selection.status}`,
-        level: selection.status === 'blocked' ? 'warning' : 'notice',
-        message: selection.reason || `${selection.task} selected; no PR has been published yet.`,
-        details: { Dependency: selection.dependency?.name || 'none',
-          Deferred: selection.deferred?.length || 0,
-          Blockers: (selection.blockers || []).map((item) => `${item.key}: ${item.reason}`).join('; ') || 'none',
-          Skipped: (selection.skipped || []).map((item) => `${item.key}: ${item.reason}`).join('; ') || 'none' } });
+      reportDependencySelection(selection);
     } else if (process.argv.includes('--publish')) {
       publishDependencyStage({ selection: read(process.env.DEPENDENCY_SELECTION), result: read(process.env.DEPENDENCY_RESULT),
         base: process.env.DEFAULT_BRANCH });

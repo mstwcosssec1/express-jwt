@@ -33,6 +33,10 @@ inputs:
     description: "Prepare cached threat-model skills; always enabled for bootstrap-threat-model"
     required: false
     default: "false"
+  restore_state:
+    description: "Restore shared state; set false when the calling workflow already restored it"
+    required: false
+    default: "true"
 
 outputs:
   status:
@@ -56,6 +60,9 @@ outputs:
   result_file:
     description: "Path to the structured JSON result file"
     value: ${{ steps.run-agent.outputs.result_file }}
+  cache_writable:
+    description: "Whether the runtime cache token permits saving shared state"
+    value: ${{ steps.cache-access.outputs.writable }}
 
 runs:
   using: "composite"
@@ -66,7 +73,12 @@ runs:
         node-version: "24"
         package-manager-cache: false
 
+    - name: Check effective cache access
+      id: cache-access
+      uses: $/.github/actions/lights-on-cache-access
+
     - name: Restore shared Lights On state
+      if: inputs.restore_state != 'false' && steps.cache-access.outputs.readable == 'true'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |

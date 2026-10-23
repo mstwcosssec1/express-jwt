@@ -1,0 +1,12 @@
+name: Lights On Cache Access
+description: Determine effective cache access without changing runtime permissions.
+outputs:
+  readable:
+    description: Whether this job may restore caches.
+  writable:
+    description: Whether this job may save caches.
+  mode:
+    description: Effective cache mode, or the conservative legacy-runner default.
+runs:
+  using: node24
+  main: index.mjs

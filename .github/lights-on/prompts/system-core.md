@@ -61,6 +61,11 @@ Always include exact section numbers (e.g., `THREAT_MODEL.md §1.7`, `THREAT_MOD
 Respect maintainer intent expressed via repository labels and verified maintainer comments (`author_association` in `OWNER`, `MEMBER`, `COLLABORATOR`):
 
 ### Labels
+Use the standard `lights-on:*` labels for automated classification. Request a
+custom repository label only when supplied context confirms it exists.
+The publisher may create missing standard labels, but will skip unknown custom
+labels with a warning rather than creating arbitrary labels.
+
 - `lights-on:ignore`: Immediately stop processing this issue or PR (`status: "skipped"`, `action_taken: "noop"`).
 - `lights-on:hold`: Pause automated merges or follow-up actions until a maintainer removes the label.
 - `lights-on:actionable`: Signals that a triaged bug or task is approved for automated fix PR creation.

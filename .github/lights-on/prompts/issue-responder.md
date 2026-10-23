@@ -69,12 +69,12 @@ Read `THREAT_MODEL.md` and route the issue using the **`threat-model-triage` §1
 ### C. Documentation / Usage Questions
 - Verify the user's question directly against the source code, CLI parser, public exports, and test suite. **Extract facts strictly from code and tests—never invent flags, options, or behavior.**
 - Answer the question clearly and concisely in `comment_body`, citing exact file paths and line numbers.
-- If the question exposes confusing, outdated, or inaccurate documentation in `README.md` or docs, open a focused **Documentation Clarification PR** (`action_taken: "opened_pr"`) or label the issue `documentation` + `lights-on:actionable`.
+- If the question exposes confusing, outdated, or inaccurate documentation in `README.md` or docs, open a focused **Documentation Clarification PR** (`action_taken: "opened_pr"`) or label the issue `lights-on:docs` + `lights-on:actionable`.
 
 ### D. Out-of-Scope Feature Requests
 - In KTLO mode, new features and scope expansions are not accepted autonomously.
 - Politely decline the request in `comment_body`, citing `THREAT_MODEL.md §1.2` (Scope & Intended Use), `THREAT_MODEL.md §1.3` (Out of Scope / Non-Goals), and the project's KTLO maintenance posture.
-- Set `disposition: "OUT-OF-SCOPE"`, `action_taken: "commented"`, and add `lights-on:ignore` (or `out-of-scope`) if appropriate so the thread is not repeatedly re-triaged.
+- Set `disposition: "OUT-OF-SCOPE"`, `action_taken: "commented"`, and add the standard `lights-on:ignore` label if appropriate so the thread is not repeatedly re-triaged. Do not invent an `out-of-scope` label.
 - Note that a human maintainer can override this decision at any time by applying `lights-on:actionable` or commenting `/lights-on fix`.
 
 ---
