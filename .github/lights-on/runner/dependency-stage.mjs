@@ -93,7 +93,7 @@ export function publishDependencyStage({ selection, result, repoRoot = process.c
     run('git', ['add', '--', ...changed]);
     const title = `chore(deps): ${selection.task === 'dependency-updater' ? 'update' : 'migrate'} ${selection.dependency.name}`;
     run('git', ['commit', '-m', title, '-m', describeCommit({ result, files: changed })]);
-    run('git', ['push', '-u', 'origin', selection.branch, '--force']);
+    run('git', ['push', '-u', 'origin', selection.branch]);
     const published = publishPr({ repo, installedRepo: repo, head: selection.branch, base, title, body,
       labels: ['lights-on:dependencies'], execFileImpl: (cmd, args, opts) => run(cmd, args, opts), env });
     run('git', ['checkout', base]);

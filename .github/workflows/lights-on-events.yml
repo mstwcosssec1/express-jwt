@@ -300,7 +300,7 @@ jobs:
             execFileSync('git', ['checkout', '-B', branchName], { stdio: 'inherit' });
             execFileSync('git', ['add', '-A'], { stdio: 'inherit' });
             execFileSync('git', ['commit', '-m', prTitle, '-m', describeCommit({ result })], { stdio: 'inherit' });
-            execFileSync('git', ['push', '-u', 'origin', branchName, '--force'], { stdio: 'inherit' });
+            execFileSync('git', ['push', '-u', 'origin', branchName], { stdio: 'inherit' });
 
             fs.writeFileSync('/tmp/lights-on-pr-body.md', prBody, 'utf8');
             publishPr({ repo: installedRepo, head: branchName, base: process.env.DEFAULT_BRANCH || 'main',

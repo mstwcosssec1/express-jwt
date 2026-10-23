@@ -177,7 +177,7 @@ jobs:
               --title "docs(security): bootstrap and sync THREAT_MODEL.md" \
               --output /tmp/lights-on-bootstrap-pr.md --commit-output /tmp/lights-on-bootstrap-commit.txt
             git commit -F /tmp/lights-on-bootstrap-commit.txt
-            node .github/lights-on/runner/github-io.mjs git-push -u origin "$branch" --force
+            node .github/lights-on/runner/github-io.mjs git-push -u origin "$branch"
             node .github/lights-on/runner/publish-pr.mjs \
               --title "docs(security): bootstrap and sync THREAT_MODEL.md" \
               --body-file /tmp/lights-on-bootstrap-pr.md \
@@ -236,7 +236,7 @@ jobs:
               --title "fix(security): automated vulnerability remediation" \
               --output /tmp/lights-on-security-pr.md --commit-output /tmp/lights-on-security-commit.txt
             git commit -F /tmp/lights-on-security-commit.txt
-            node .github/lights-on/runner/github-io.mjs git-push -u origin "$branch" --force
+            node .github/lights-on/runner/github-io.mjs git-push -u origin "$branch"
             node .github/lights-on/runner/publish-pr.mjs \
               --title "fix(security): automated vulnerability remediation" \
               --body-file /tmp/lights-on-security-pr.md \
@@ -298,10 +298,22 @@ jobs:
         run: node .github/lights-on/runner/maintain-toolchains.mjs --publish
 
       # Step H — Documentation Clarification & Actionable Issue Fixes (docs-clarifier / issue-responder)
+      - name: Select documentation work against PR history
+        id: docs-selection
+        if: >-
+          steps.config.outputs.enabled != 'false' &&
+          (inputs.task == 'all' || inputs.task == 'docs' || inputs.task == 'issues' || inputs.task == '')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+          UPSTREAM_CONTEXT: ${{ steps.upstream-sync.outputs.context_file }}
+        run: node .github/lights-on/runner/documentation-stage.mjs --prepare
+
       - name: Step H — Clarify documentation (docs-clarifier)
         id: docs-agent
         if: >-
           steps.config.outputs.enabled != 'false' &&
+          steps.docs-selection.outputs.ready == 'true' &&
           (inputs.task == 'all' || inputs.task == 'docs' || inputs.task == 'issues' || inputs.task == '')
         uses: $/.github/actions/lights-on-agent
         env:
@@ -315,40 +327,19 @@ jobs:
           task: docs-clarifier
           restore_state: 'false'
           tier: default
-          context_file: ${{ steps.upstream-sync.outputs.context_file }}
+          context_file: /tmp/lights-on-docs-context.json
           output_file: /tmp/lights-on-docs-result.json
 
       - name: Open Documentation Clarification PR if changes were produced
         if: >-
           steps.config.outputs.enabled != 'false' &&
+          steps.docs-selection.outputs.ready == 'true' &&
           steps.docs-agent.outputs.status == 'completed' &&
           (inputs.task == 'all' || inputs.task == 'docs' || inputs.task == 'issues' || inputs.task == '')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
-        run: |
-          if [ -n "$(git status --porcelain)" ]; then
-            branch="lights-on/docs-clarification-$(date +%Y%m%d)"
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git checkout -B "$branch"
-            git add -A
-            node .github/lights-on/runner/describe-change.mjs \
-              --result /tmp/lights-on-docs-result.json \
-              --title "docs: clarify documentation" \
-              --output /tmp/lights-on-docs-pr.md --commit-output /tmp/lights-on-docs-commit.txt
-            git commit -F /tmp/lights-on-docs-commit.txt
-            node .github/lights-on/runner/github-io.mjs git-push -u origin "$branch" --force
-            node .github/lights-on/runner/publish-pr.mjs \
-              --title "docs: clarify documentation" \
-              --body-file /tmp/lights-on-docs-pr.md \
-              --label "lights-on:docs" \
-              --base "$DEFAULT_BRANCH" \
-              --head "$branch"
-            git checkout "$DEFAULT_BRANCH"
-          else
-            node .github/lights-on/runner/workflow-report.mjs --title "Documentation publication skipped" --message "No documentation changes were produced; no PR was published."
-          fi
+        run: node .github/lights-on/runner/documentation-stage.mjs --publish
 
       - name: Fetch open actionable issues
         id: actionable-issues
@@ -432,7 +423,7 @@ jobs:
             execFileSync('git', ['checkout', '-B', branch], { stdio: 'inherit' });
             execFileSync('git', ['add', '-A'], { stdio: 'inherit' });
             execFileSync('git', ['commit', '-m', title, '-m', describeCommit({ result })], { stdio: 'inherit' });
-            execFileSync('git', ['push', '-u', 'origin', branch, '--force'], { stdio: 'inherit' });
+            execFileSync('git', ['push', '-u', 'origin', branch], { stdio: 'inherit' });
 
             fs.writeFileSync('/tmp/lights-on-issue-fix-pr.md', body, 'utf8');
             publishPr({ repo: installedRepo, head: branch, base: defaultBranch, title,
@@ -489,7 +480,7 @@ jobs:
             execFileSync('git', ['add', '--', 'CHANGELOG.md'], { stdio: 'inherit' });
           }
           execFileSync('git', ['commit', '-m', res.prTitle, '-m', describeCommit({ result: res, files: res.updatedFiles })], { stdio: 'inherit' });
-          execFileSync('git', ['push', '-u', 'origin', branch, '--force'], { stdio: 'inherit' });
+          execFileSync('git', ['push', '-u', 'origin', branch], { stdio: 'inherit' });
 
           fs.writeFileSync('/tmp/lights-on-release-pr.md', res.prBody, 'utf8');
           publishPr({ head: branch, base: defaultBranch, title: res.prTitle,

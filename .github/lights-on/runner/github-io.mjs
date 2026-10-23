@@ -164,7 +164,7 @@ export function pushGit(args, options = {}, execFileImpl = nativeExecFileSync) {
   if (typeof token !== 'string' || !token.trim() || /[\r\n]/.test(token)) {
     throw new Error('Git publication requires a valid GH_TOKEN or GITHUB_TOKEN for this step.');
   }
-  const flags = new Set(['-u', '--set-upstream', '--force', '--force-with-lease']);
+  const flags = new Set(['-u', '--set-upstream']);
   if (!Array.isArray(args) || args.some((arg) => typeof arg !== 'string' ||
       (arg.startsWith('-') && !flags.has(arg)))) throw new Error('Unsupported Git publication arguments.');
   const positional = args.filter((arg) => !arg.startsWith('-'));
@@ -182,9 +182,11 @@ export function pushGit(args, options = {}, execFileImpl = nativeExecFileSync) {
   if (urls.length !== 1 || !allowed.includes(urls[0].replace(/\/$/, '').toLowerCase())) {
     throw new Error('REPO_WRITE_VIOLATION: Git push origin must be the installed HTTPS GitHub repository.');
   }
+  // An explicit absent-ref lease rejects even fast-forward replacement of an existing branch.
+  const pushArgs = branch ? [...args, `--force-with-lease=refs/heads/${ref.replace(/^refs\/heads\//, '')}:`] : args;
   // Credentials come from this step's environment; token/helper settings are not written to Git config.
   return execFileImpl('git', ['-c', 'credential.helper=', '-c', 'credential.helper=!gh auth git-credential',
-    '-c', 'credential.useHttpPath=true', '-c', 'http.followRedirects=false', 'push', ...args],
+    '-c', 'credential.useHttpPath=true', '-c', 'http.followRedirects=false', 'push', ...pushArgs],
   { ...options, env: { ...env, GIT_TERMINAL_PROMPT: '0', GH_PROMPT_DISABLED: '1' } });
 }
 
@@ -219,7 +221,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     if (process.argv[2] === 'git-push') pushGit(process.argv.slice(3), { stdio: 'inherit' });
     else runGitHub(process.argv.slice(2), { stdio: 'inherit' });
   } catch {
-    console.error('Lights On GitHub operation failed; no external host/repository fallback is permitted.');
+    console.error('Lights On GitHub operation failed; branch collisions and API errors block publication. No overwrite or external host/repository fallback is permitted.');
     process.exitCode = 1;
   }
 }

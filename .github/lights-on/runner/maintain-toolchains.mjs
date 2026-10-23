@@ -6,7 +6,7 @@ import { execFileSync } from './github-io.mjs';
 import { loadConfig } from './load-config.mjs';
 import { publishPr } from './publish-pr.mjs';
 import { assertWriteTargetIsInstalledRepo, neutralizeCrossRepoAutoLinks } from './sync-upstream.mjs';
-import { reportWorkflowEvent } from './workflow-report.mjs';
+import { reportWorkflowEvent, githubItemUrl } from './workflow-report.mjs';
 import { describeCommit } from './describe-change.mjs';
 
 export const NODE_SCHEDULE_URL = 'https://raw.githubusercontent.com/nodejs/Release/main/schedule.json';
@@ -294,25 +294,32 @@ export async function maintainToolchains({ repoRoot = process.cwd(), config = lo
     ...plan.notes
   ].join('\n'), '', { installedRepo: repo });
   const existing = JSON.parse(run('gh', ['pr', 'list', '--repo', repo, '--head', branch, '--base', base,
-    '--state', 'open', '--json', 'headRefName,isCrossRepository']));
+    '--state', 'open', '--json', 'number,title,headRefName,headRepositoryOwner,isCrossRepository']));
   if (!Array.isArray(existing)) throw new Error('Invalid existing toolchain PR response.');
-  if (!existing.some((pr) => pr.headRefName === branch && pr.isCrossRepository === false)) {
-    for (const change of plan.changes) {
-      if (hash(fs.readFileSync(safePath(path.resolve(repoRoot), change.file), 'utf8')) !== change.before_sha256) {
-        throw new Error('Toolchain source changed during planning.');
-      }
-    }
-    run('git', ['checkout', '-B', branch]);
-    for (const change of plan.changes) fs.writeFileSync(safePath(path.resolve(repoRoot), change.file), change.content);
-    run('git', ['add', '--', ...plan.changes.map((change) => change.file)]);
-    run('git', ['-c', 'user.name=github-actions[bot]', '-c', 'user.email=41898282+github-actions[bot]@users.noreply.github.com',
-      'commit', '-m', title, '-m', describeCommit({
-        result: { summary: `Maintain Node runtimes using the ${plan.policy} lifecycle policy.`,
-          details: { rationale: plan.changes.flatMap((change) => change.reasons).join(' ') }, hold: true },
-        files: plan.changes.map((change) => change.file)
-      })]);
-    run('git', ['push', '-u', 'origin', branch, '--force']);
+  const pending = existing.find((pr) => pr.headRefName === branch && pr.isCrossRepository === false &&
+    pr.headRepositoryOwner?.login?.toLowerCase() === repo.split('/')[0].toLowerCase());
+  if (pending) {
+    const url = githubItemUrl(repo, 'pull', pending.number, env);
+    reportWorkflowEvent({ title: 'Toolchain publication skipped',
+      message: 'An existing proposal already covers this plan; its branch and description were not changed.', url }, { env });
+    return { ...plan, status: 'skipped', reason: 'open-toolchain-pr-exists',
+      pr: { created: false, url, title: pending.title } };
   }
+  for (const change of plan.changes) {
+    if (hash(fs.readFileSync(safePath(path.resolve(repoRoot), change.file), 'utf8')) !== change.before_sha256) {
+      throw new Error('Toolchain source changed during planning.');
+    }
+  }
+  run('git', ['checkout', '-B', branch]);
+  for (const change of plan.changes) fs.writeFileSync(safePath(path.resolve(repoRoot), change.file), change.content);
+  run('git', ['add', '--', ...plan.changes.map((change) => change.file)]);
+  run('git', ['-c', 'user.name=github-actions[bot]', '-c', 'user.email=41898282+github-actions[bot]@users.noreply.github.com',
+    'commit', '-m', title, '-m', describeCommit({
+      result: { summary: `Maintain Node runtimes using the ${plan.policy} lifecycle policy.`,
+        details: { rationale: plan.changes.flatMap((change) => change.reasons).join(' ') }, hold: true },
+      files: plan.changes.map((change) => change.file)
+    })]);
+  run('git', ['push', '-u', 'origin', branch]);
   const pr = publishPr({ repo, installedRepo: repo, head: branch, base, title, body,
     labels: ['lights-on:dependencies', 'lights-on:hold'], env, execFileImpl: (cmd, args, options) => run(cmd, args, options) });
   run('git', ['checkout', base]);

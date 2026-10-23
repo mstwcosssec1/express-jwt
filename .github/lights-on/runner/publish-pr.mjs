@@ -8,7 +8,7 @@ import { ensureLabels } from './ensure-labels.mjs';
 import { reportWorkflowEvent, githubItemUrl } from './workflow-report.mjs';
 
 function publishPrOperation({ repo = process.env.GITHUB_REPOSITORY,
-  installedRepo = process.env.GITHUB_REPOSITORY, head, base, title, body, bodyFile,
+  installedRepo = process.env.GITHUB_REPOSITORY, head, headSha, base, title, body, bodyFile,
   labels = [], closesIssue, execFileImpl = execFileSync, env = process.env } = {}) {
   const target = assertWriteTargetIsInstalledRepo(repo, installedRepo);
   if (!head || !base || !title || (typeof body !== 'string' && !bodyFile)) {
@@ -17,15 +17,27 @@ function publishPrOperation({ repo = process.env.GITHUB_REPOSITORY,
   title = plainPublicationText(title);
   // Apply this even with an injected executor: no caller may bypass body handling.
   body = markdownPublicationBody(bodyFile ? fs.readFileSync(bodyFile, 'utf8') : body);
+  headSha ??= String(execFileImpl('git', ['rev-parse', '--verify', `refs/heads/${head}^{commit}`],
+    { env, encoding: 'utf8' })).trim();
+  if (!/^[a-f0-9]{40}$/.test(headSha)) throw new Error('PR publication requires the exact candidate commit SHA.');
+  if (closesIssue !== undefined && (!Number.isSafeInteger(closesIssue) || closesIssue <= 0)) {
+    throw new Error('Invalid trusted local issue-closing request.');
+  }
+  const expectedBody = body + (closesIssue === undefined ? '' : `\n\nCloses #${closesIssue}`);
   ensureLabels({ repo: target, installedRepo, labels, execFileImpl, env });
   const findExisting = () => {
     const items = JSON.parse(execFileImpl('gh', ['pr', 'list', '--repo', target,
-      '--head', head, '--base', base, '--state', 'open', '--json', 'number,url,title,headRefName,baseRefName,headRepositoryOwner,isCrossRepository'],
+      '--head', head, '--base', base, '--state', 'open', '--json', 'number,url,title,body,headRefOid,headRefName,baseRefName,headRepositoryOwner,isCrossRepository'],
     { env, encoding: 'utf8' }));
     if (!Array.isArray(items)) throw new Error('Invalid PR lookup response.');
-    return items.find((item) => item.headRefName === head && item.baseRefName === base &&
+    const existing = items.find((item) => item.headRefName === head && item.baseRefName === base &&
       item.isCrossRepository === false &&
       item.headRepositoryOwner?.login?.toLowerCase() === target.split('/')[0].toLowerCase());
+    if (existing && (existing.headRefOid !== headSha || existing.title !== title ||
+        typeof existing.body !== 'string' || existing.body.replace(/\r\n/g, '\n').trim() !== expectedBody.trim())) {
+      throw new Error('Existing PR head or description differs from this candidate; refusing to overwrite or reuse stale publication evidence.');
+    }
+    return existing;
   };
   const existing = findExisting();
   if (existing) {
