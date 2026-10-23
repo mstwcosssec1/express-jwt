@@ -15,6 +15,7 @@ $ npm install express-jwt
 Options has the following parameters:
 
 - `secret: jwt.Secret | GetVerificationKey` (required): The secret as a string or a function to retrieve the secret.
+- `algorithms: jwt.Algorithm[]` (required): List of allowed JWT algorithms. The middleware throws a `RangeError` at startup if it is missing or not an array. See [Required Parameters](#required-parameters).
 - `getToken?: TokenGetter` (optional): A function that receives the express `Request` and returns the token, by default it looks in the `Authorization` header.
 - `isRevoked?: IsRevoked` (optional): A function to verify if a token is revoked.
 - `onExpired?: ExpirationHandler` (optional): A function to handle expired tokens.
